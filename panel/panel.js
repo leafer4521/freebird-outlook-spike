@@ -2,6 +2,7 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
+const PANEL_VERSION = "0.2.1";      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
 const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
 const SET_NAME = "fbo.settings";
@@ -271,7 +272,7 @@ function viewChoose() {
 
 function settingsPart(redraw) {
   const set = settings();
-  if (!S.showSettings) return h("button", { class: "link quiet", onclick: () => { S.showSettings = true; redraw(); } }, "Settings");
+  if (!S.showSettings) return h("button", { class: "link quiet", onclick: () => { S.showSettings = true; redraw(); } }, "Settings · panel " + PANEL_VERSION);
   const row = (k, label, sub) => {
     const box = h("input", { type: "checkbox", checked: !!set[k] });
     box.addEventListener("change", () => { setSetting(k, box.checked); redraw(); });
