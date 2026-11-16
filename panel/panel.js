@@ -104,7 +104,7 @@ async function match(q, my) {
   catch (e) { if (my !== runId) return; return handle(e, () => match(q, my)); }
   if (my !== runId) return;
   if (!m.ok) return viewError(m.error, () => match(q, my));
-  S.match = m;
+  S.match = m; S.showList = false;
   S.chosen = m.suggested ? m.matches.find(x => x.id === m.suggested) : null;
   viewChoose();
 }
@@ -136,10 +136,14 @@ function viewChoose() {
   if (!m.matches.length) {
     listPart = [note("warn", h("p", {}, m.typed ? "No client in HawkSoft matches “" + m.query + "”." : "No client in HawkSoft has the address " + S.from + "."), h("p", { class: "small" }, "Search by the client's name instead:")), searchBox()];
   } else {
-    const intro = m.matches.length === 1
+    const total = m.total || m.matches.length;
+    const intro = total === 1
       ? (m.typed ? "This client matches your search:" : "This client has the sender's address:")
-      : m.matches.length + " clients match" + (m.typed ? " your search" : " the sender") + ". " + (m.suggested ? "FreeBird picked the one the e-mail names. Check it, or choose another." : "Which one is this e-mail about?");
-    const cards = m.matches.map(c => {
+      : total + " clients match" + (m.typed ? " your search" : " the sender") + ". " + (m.suggested ? "FreeBird picked the one the e-mail names. Check it, or choose another." : "Which one is this e-mail about?");
+    // once a client is chosen the list folds to that one, so the description and note are right below it (live 2026-11-16: a long list hid them)
+    const folded = S.chosen && !S.showList;
+    const list = folded ? [S.chosen] : m.matches;
+    const cards = list.map(c => {
       const radio = h("input", { type: "radio", name: "client", value: c.id, checked: S.chosen && S.chosen.id === c.id, disabled: c.blocked });
       const card = h("label", { class: "client" + (S.chosen && S.chosen.id === c.id ? " on" : "") + (c.blocked ? " off" : "") },
         radio,
@@ -149,12 +153,18 @@ function viewChoose() {
             c.named ? h("span", { class: "badge named" }, "Named in e-mail") : null),
           h("div", { class: "meta" }, [c.type, c.status, c.address].filter(Boolean).join(" · ") + " · ID " + c.id),
           c.blocked ? h("div", { class: "meta" }, "Test mode: only “" + S.testPrefix + "” clients") : null));
-      radio.addEventListener("change", () => { S.chosen = c; S.desc = desc.value; S.note = noteBox.value; viewChoose(); });
+      radio.addEventListener("change", () => { S.chosen = c; S.showList = false; S.desc = desc.value; S.note = noteBox.value; viewChoose(); });
       return card;
     });
-    listPart = [h("p", {}, intro), m.suggested && m.why ? h("p", { class: "muted small" }, "Why: " + m.why + ".") : null,
-      h("div", { class: "clients", role: "radiogroup" }, cards),
-      h("button", { class: "link", onclick: (ev) => { ev.target.replaceWith(searchBox()); } }, "Not listed? Search HawkSoft by name")];
+    const keep = () => { S.desc = desc.value; S.note = noteBox.value; };
+    listPart = folded
+      ? [h("div", { class: "clients" }, cards),
+         h("button", { class: "link", onclick: () => { keep(); S.showList = true; viewChoose(); } }, total > 1 ? "Change client (" + total + " matched)" : "Change client")]
+      : [h("p", {}, intro), m.suggested && m.why ? h("p", { class: "muted small" }, "Why: " + m.why + ".") : null,
+         m.more ? note("warn", h("p", {}, "Showing " + m.matches.length + " of " + total + ". Type more of the name to narrow it down:")) : null,
+         m.more ? searchBox(m.typed ? m.query : "") : null,
+         h("div", { class: "clients", role: "radiogroup" }, cards),
+         m.more ? null : h("button", { class: "link", onclick: (ev) => { ev.target.replaceWith(searchBox()); } }, "Not listed? Search HawkSoft by name")];
   }
 
   show(mailCard(),
@@ -167,8 +177,8 @@ function viewChoose() {
     go);
 }
 
-function searchBox() {
-  const q = h("input", { type: "text", placeholder: "Client name, phone or policy number", "aria-label": "Search HawkSoft" });
+function searchBox(initial) {
+  const q = h("input", { type: "text", placeholder: "Client name, phone or policy number", "aria-label": "Search HawkSoft", value: initial || null });
   const run = () => { if (q.value.trim()) match({ query: q.value.trim() }, runId); };
   q.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
   return h("div", { class: "row" }, q, h("button", { class: "secondary", onclick: run }, "Search"));
@@ -258,8 +268,9 @@ function viewQuestion(ni) {
 function viewFailed(j) {
   const may = j.maySaved;
   show(mailCard(),
-    note("bad", h("p", {}, "FreeBird could not file this e-mail."), h("p", {}, j.error || ("It ended with status " + j.status + "."))),
-    may ? note("warn", h("p", {}, "HawkSoft may already have saved " + may + ". Check the client in HawkSoft before trying again.")) : null,
+    note("bad", h("p", {}, "FreeBird could not file this e-mail."), h("p", { class: "small" }, "FreeBird says: " + (j.error || ("it ended with status " + j.status + ".")))),
+    may ? note("warn", h("p", {}, "HawkSoft may already have saved " + may + ". Check the client in HawkSoft before trying again."))
+        : h("p", { class: "muted small" }, "Nothing was saved in HawkSoft."),
     h("div", { class: "actions" }, h("button", { class: "secondary", onclick: viewChoose }, "Back"), may ? null : h("button", { class: "primary", onclick: review }, "Try again")));
 }
 
