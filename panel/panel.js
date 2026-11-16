@@ -87,7 +87,10 @@ Office.onReady(() => {
 });
 
 // The e-mail's attachments: files (photos, PDFs ...) and attached e-mails can be handed over (Mailbox 1.8); cloud links cannot.
-// Pictures inside the message body (logos, signatures - or a pasted photo) are listed but not ticked.
+// Pictures inside the message body are ticked too - Gmail puts photos pasted into the message there (live 2026-11-16: both claim photos
+// were in the body) - except ones that look like signature art: Outlook's image001.png, logos, social icons, or under 5 KB.
+const SIG_NAME = /^(image\d{3}\.|outlook-|~wrl|logo|signature|sig[ _.-]|facebook|twitter|linkedin|instagram|youtube|x-logo)/i;
+const SIG_MAX = 5 * 1024;
 function readAttachments(item) {
   let canRead = false;
   try { canRead = Office.context.requirements.isSetSupported("Mailbox", "1.8") && typeof item.getAttachmentContentAsync === "function"; } catch (e) { }
@@ -99,7 +102,8 @@ function readAttachments(item) {
     if (type === "cloud") why = "a cloud link, not a file";
     else if (!canRead) why = "this Outlook can't hand it over";
     else if (a.size > FILE_MAX) why = "over HawkSoft's 25 MB";
-    return { id: a.id, name, size: a.size || 0, inline: !!a.isInline, type, why };
+    const inline = !!a.isInline;
+    return { id: a.id, name, size: a.size || 0, inline, sig: inline && (SIG_NAME.test(name) || (a.size || 0) < SIG_MAX), type, why };
   });
 }
 
@@ -114,7 +118,7 @@ async function start() {
   S.extra = {};
   S.pols = {};
   S.atts = readAttachments(item);
-  S.pick = new Set(S.atts.filter(a => !a.why && !a.inline).map(a => a.id));
+  S.pick = new Set(S.atts.filter(a => !a.why && !a.sig).map(a => a.id));
   busy("Checking FreeBird…");
   try {
     S.text = (await officeAsync(cb => item.body.getAsync(Office.CoercionType.Text, cb)) || "").slice(0, TEXT_LIMIT);
@@ -239,7 +243,7 @@ function viewChoose() {
         const box = h("input", { type: "checkbox", checked: S.pick.has(a.id), disabled: !!a.why });
         box.addEventListener("change", () => { if (box.checked) S.pick.add(a.id); else S.pick.delete(a.id); redraw(); });
         return h("label", { class: "att" + (a.why ? " off" : "") }, box,
-          h("div", {}, h("div", { class: "name" }, a.name), h("div", { class: "meta" }, [a.size ? kb(a.size) : "", a.why || (a.inline ? "in the message body" : "")].filter(Boolean).join(" · "))));
+          h("div", {}, h("div", { class: "name" }, a.name), h("div", { class: "meta" }, [a.size ? kb(a.size) : "", a.why || (a.sig ? "in the message body, looks like a signature picture" : a.inline ? "in the message body" : "")].filter(Boolean).join(" · "))));
       }))];
   }
 
