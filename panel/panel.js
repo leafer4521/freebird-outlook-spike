@@ -2,7 +2,7 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
-const PANEL_VERSION = "0.2.1";      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
+const PANEL_VERSION = "0.2.2";      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
 const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
 const SET_NAME = "fbo.settings";
@@ -11,9 +11,10 @@ const POLL_MS = 1000, POLL_MAX_MS = 10 * 60 * 1000;
 const FILE_MAX = 25 * 1024 * 1024;  // FreeBird attaches files up to 25 MB (attach-file)
 
 // Settings (Ben, 2026-11-16): fewer clicks by default - "Attach" files at once (the click is the approval; FreeBird's plan is still
-// shown when FreeBird warns, e.g. the same filing was already done today) - and the e-mail goes on the client unless the person
-// turns on choosing a policy.
-const DEFAULTS = { showPlan: false, choosePolicy: false };
+// shown when FreeBird warns, e.g. the same filing was already done today).
+// The policy is not a setting (Leif, 2026-11-16 live test): a "File on" menu shows as soon as a client is chosen, set to the client;
+// a policy picked there gets the e-mail instead.
+const DEFAULTS = { showPlan: false };
 
 const S = {};                       // the current e-mail and what has been chosen for it
 let runId = 0;                      // a newer e-mail (ItemChanged) cancels the views of an older one
@@ -169,9 +170,9 @@ function mailCard() {
 }
 
 function picked() { return S.atts.filter(a => S.pick.has(a.id)); }
-function polLabel(p) { return [p.tab || p.policy, p.number, p.effective && p.expiration ? p.effective + "–" + p.expiration : ""].filter(Boolean).join(" · "); }
+function polLabel(p) { return [p.tab || p.policy, p.number, p.effective && p.expiration ? p.effective + "–" + p.expiration : p.effective ? "from " + p.effective : ""].filter(Boolean).join(" · "); }
 function whereText() {
-  const p = S.policy && (S.pols[S.chosen.id] || []).find(x => x.policy === S.policy);
+  const l = S.pols[S.chosen.id], p = S.policy && Array.isArray(l) && l.find(x => x.policy === S.policy);
   return S.chosen.name + (p ? ", policy " + (p.tab || p.policy) : "");
 }
 
@@ -220,20 +221,25 @@ function viewChoose() {
          m.more ? null : h("button", { class: "link", onclick: (ev) => { ev.target.replaceWith(searchBox()); } }, "Not listed? Search HawkSoft by name")];
   }
 
-  // File on: the client (default) or one of its policies - only with the setting on
+  // File on: the client (default) or one of its policies. Read once per client; until then (about a second) it is the client, and
+  // Attach does not wait for it. Policies in force first, prospects and the rest below.
   let polPart = null;
-  if (set.choosePolicy && S.chosen) {
+  if (S.chosen) {
     const pols = S.pols[S.chosen.id];
-    if (pols === undefined) { loadPolicies(S.chosen, redraw); polPart = [h("h3", {}, "File on"), h("p", { class: "muted small" }, "Reading the client's policies…")]; }
-    else if (pols.error) polPart = [h("h3", {}, "File on"), note("warn", h("p", { class: "small" }, "Couldn't read the policies, so it goes on the client: " + pols.error))];
-    else {
-      const sel = h("select", { id: "policy", "aria-label": "File on" },
-        h("option", { value: "" }, "The client (no policy)"),
-        pols.map(p => h("option", { value: p.policy }, polLabel(p) + (p.status && p.status !== "Active" ? " (" + p.status + ")" : ""))));
-      sel.value = S.policy || "";
-      sel.addEventListener("change", () => { S.policy = sel.value; S.extra = {}; redraw(); });
-      polPart = [h("h3", {}, "File on"), sel, pols.length ? null : h("p", { class: "muted small" }, "This client has no policies in HawkSoft.")];
-    }
+    if (pols === undefined) loadPolicies(S.chosen, redraw);
+    const list = Array.isArray(pols) ? pols : [];
+    const opt = (p) => h("option", { value: p.policy }, polLabel(p));
+    const inForce = list.filter(p => p.inForce), other = list.filter(p => !p.inForce);
+    const sel = h("select", { id: "policy", "aria-label": "File on", disabled: pols === undefined },
+      h("option", { value: "" }, "The client (no policy)"),
+      inForce.length && other.length ? [h("optgroup", { label: "In force" }, inForce.map(opt)), h("optgroup", { label: "Prospects and others" }, other.map(opt))] : list.map(opt));
+    sel.value = S.policy || "";
+    sel.addEventListener("change", () => { S.policy = sel.value; S.extra = {}; redraw(); });
+    const sub = pols === undefined ? "Reading the client's policies…"
+      : pols.error ? "Couldn't read the policies (" + pols.error + "), so it goes on the client."
+      : !list.length ? "This client has no policies in HawkSoft, so it goes on the client."
+      : S.policy ? "On this policy, not on the client's own tab." : "Leave it on the client, or pick a policy.";
+    polPart = [h("h3", {}, "File on"), sel, h("p", { class: "muted small sub" }, sub)];
   }
 
   // the attachments: ticked = filed too, each as its own attachment with its own log
@@ -250,7 +256,7 @@ function viewChoose() {
 
   const n = picked().length;
   const what = "the e-mail" + (n ? " and " + plural(n, "attachment", "attachments") : "");
-  const go = h("button", { class: "primary", disabled: !S.chosen || (set.choosePolicy && S.chosen && S.pols[S.chosen.id] === undefined), onclick: () => { S.desc = desc.value.trim(); S.note = noteBox.value.trim(); review(); } },
+  const go = h("button", { class: "primary", disabled: !S.chosen, onclick: () => { S.desc = desc.value.trim(); S.note = noteBox.value.trim(); review(); } },
     set.showPlan ? "Review and file" : "Attach");
   const hint = !S.chosen ? "Choose the client first."
     : set.showPlan ? "You see FreeBird's plan for " + what + " before anything is filed."
@@ -280,7 +286,6 @@ function settingsPart(redraw) {
   };
   return h("div", { class: "settings" },
     h("h3", {}, "Settings"),
-    row("choosePolicy", "Choose a policy", "Off: files go on the client. On: pick one of the client's policies."),
     row("showPlan", "Show FreeBird's plan first", "Off: Attach files at once. On: you confirm FreeBird's plan."),
     h("button", { class: "link quiet", onclick: () => { S.showSettings = false; redraw(); } }, "Close settings"));
 }
