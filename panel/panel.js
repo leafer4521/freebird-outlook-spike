@@ -2,7 +2,7 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
-const BRIDGE = "http://127.0.0.1:8791";
+const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
 const TEXT_LIMIT = 20000;           // characters of the body sent for "is this client named in the e-mail?"
 const POLL_MS = 1000, POLL_MAX_MS = 5 * 60 * 1000;
