@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FreeBird link test</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  body { font: 13px/1.45 "Segoe UI", system-ui, sans-serif; margin: 14px; color: #1b1b1b; background: #fff; }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 12px; color: #555; }
+  button { font: inherit; padding: 7px 14px; border: 0; border-radius: 4px; background: #0f6cbd; color: #fff; cursor: pointer; width: 100%; }
+  button:disabled { background: #9bb8d3; cursor: default; }
+  ol { padding-left: 18px; margin: 12px 0; }
+  li { margin: 4px 0; }
+  .ok { color: #0b6a0b; } .bad { color: #b10e1c; } .wait { color: #555; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #f4f4f4; padding: 8px; border-radius: 4px; font-size: 11px; max-height: 220px; overflow: auto; }
+</style>
+</head>
+<body>
+<h1>FreeBird link test</h1>
+<p class="sub">Checks whether Outlook lets this panel reach a program on this PC. Start <code>spike\server.ps1</code> first.</p>
+<button id="go" disabled>Run the test</button>
+<ol id="steps"></ol>
+<pre id="log"></pre>
+<script>
+const BRIDGES = ["http://127.0.0.1:8790", "http://localhost:8790"];
+const $ = (id) => document.getElementById(id);
+const log = (s) => { $("log").textContent += s + "\n"; };
+function step(text) { const li = document.createElement("li"); li.className = "wait"; li.textContent = text + " ..."; $("steps").appendChild(li);
+  return { ok: (t) => { li.className = "ok"; li.textContent = text + ": " + t; }, bad: (t) => { li.className = "bad"; li.textContent = text + ": " + t; } }; }
+
+async function tryFetch(url, opts) {
+  const t0 = performance.now();
+  try { const r = await fetch(url, opts); const body = await r.text(); return { ok: r.ok, status: r.status, body, ms: Math.round(performance.now() - t0) }; }
+  catch (e) { return { ok: false, error: String(e), ms: Math.round(performance.now() - t0) }; }
+}
+
+function getEml() {
+  return new Promise((resolve, reject) => {
+    const item = Office.context.mailbox.item;
+    if (!item.getAsFileAsync) return reject(new Error("getAsFileAsync not available (needs Mailbox 1.14)"));
+    item.getAsFileAsync((res) => res.status === Office.AsyncResultStatus.Succeeded ? resolve(res.value) : reject(res.error));
+  });
+}
+
+async function run() {
+  $("go").disabled = true; $("steps").innerHTML = ""; $("log").textContent = "";
+  const d = Office.context.diagnostics || {};
+  log("host: " + d.host + "  platform: " + d.platform + "  version: " + d.version);
+  log("page origin: " + location.origin);
+  ["1.10", "1.13", "1.14", "1.15"].forEach(v => log("Mailbox " + v + ": " + Office.context.requirements.isSetSupported("Mailbox", v)));
+
+  let base = null;
+  for (const b of BRIDGES) {
+    const s = step("Reach " + b);
+    const r = await tryFetch(b + "/ping", { method: "GET" });
+    log("GET " + b + "/ping -> " + JSON.stringify(r));
+    if (r.ok) { s.ok("yes (" + r.ms + " ms)"); base = base || b; } else s.bad(r.error || ("HTTP " + r.status));
+  }
+  if (!base) { log("\nRESULT: blocked. The panel cannot reach this PC."); $("go").disabled = false; return; }
+
+  const s2 = step("Read this e-mail as a file");
+  let eml;
+  try { eml = await getEml(); s2.ok(Math.round(eml.length * 3 / 4).toLocaleString() + " bytes"); }
+  catch (e) { s2.bad(e.message || String(e)); log("getAsFileAsync error: " + JSON.stringify(e)); $("go").disabled = false; return; }
+
+  const s3 = step("Send it to the PC (POST with JSON = preflight)");
+  const item = Office.context.mailbox.item;
+  const r3 = await tryFetch(base + "/file", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject: item.subject, from: item.from && item.from.emailAddress, emlBase64: eml }) });
+  log("POST " + base + "/file -> " + JSON.stringify(r3));
+  if (r3.ok) s3.ok("saved on the PC (" + r3.ms + " ms)"); else s3.bad(r3.error || ("HTTP " + r3.status));
+  log("\nRESULT: " + (r3.ok ? "works end to end." : "ping works, the e-mail upload does not."));
+  $("go").disabled = false;
+}
+
+Office.onReady(() => { $("go").disabled = false; $("go").onclick = run; });
+</script>
+</body>
+</html>
