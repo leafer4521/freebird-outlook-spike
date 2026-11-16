@@ -87,3 +87,15 @@ button.link { background: none; border: 0; color: var(--accent); padding: 0; fon
 .done-icon { width: 40px; height: 40px; border-radius: 50%; background: var(--ok-soft); color: var(--ok); font-size: 22px; line-height: 40px; margin: 0 auto 10px; }
 .code { font-size: 22px; letter-spacing: .3em; text-align: center; }
 ul.list { padding-left: 18px; margin: 4px 0 10px; }
+
+.atts { display: flex; flex-direction: column; gap: 4px; }
+.att { display: flex; gap: 8px; align-items: flex-start; padding: 6px 2px; cursor: pointer; }
+.att.off { opacity: .55; cursor: not-allowed; }
+.att input { margin: 3px 0 0; accent-color: var(--accent); }
+.att .name { overflow-wrap: anywhere; }
+.att .meta { color: var(--muted); font-size: 12px; }
+select { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 9px; }
+select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+.hint { margin: 12px 0 0; }
+button.link.quiet { color: var(--muted); font-weight: 400; display: block; margin: 14px auto 0; }
+.settings { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 2px; }
