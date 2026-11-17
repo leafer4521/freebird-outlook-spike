@@ -99,3 +99,21 @@ select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-co
 .hint { margin: 12px 0 0; }
 button.link.quiet { color: var(--muted); font-weight: 400; display: block; margin: 14px auto 0; }
 .settings { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 2px; }
+
+/* several e-mails selected */
+.sender { border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; margin-top: 10px; }
+.sender .who { font-weight: 600; overflow-wrap: anywhere; margin-bottom: 2px; }
+.sender .who .muted { font-weight: 400; }
+.mrow { border-top: 1px solid var(--border); padding: 8px 0 2px; }
+.sender .who + .mrow { border-top: 0; }
+.mrow.off .mhead { opacity: .55; }
+.mhead { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+.mhead input { margin: 3px 0 0; accent-color: var(--accent); }
+.mhead .name { overflow-wrap: anywhere; }
+.mrow .meta { color: var(--muted); font-size: 12px; }
+.mpick { margin: 6px 0 4px 21px; }
+.mpick .row { margin-top: 2px; }
+.mpick button.link.small, .meta button.link.small { font-size: 12px; margin-top: 4px; }
+select.need { border-color: var(--warn); }
+.warn-text { color: var(--warn) !important; }
+button.secondary.next { display: block; width: 100%; margin-top: 14px; }

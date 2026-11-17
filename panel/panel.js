@@ -2,13 +2,14 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
-const PANEL_VERSION = "0.2.2";      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
+const PANEL_VERSION = "0.3.0";      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
 const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
 const SET_NAME = "fbo.settings";
 const TEXT_LIMIT = 20000;           // characters of the body sent for "is this client named in the e-mail?"
 const POLL_MS = 1000, POLL_MAX_MS = 10 * 60 * 1000;
 const FILE_MAX = 25 * 1024 * 1024;  // FreeBird attaches files up to 25 MB (attach-file)
+const MAX_MAILS = 50;               // several e-mails selected: FreeBird files up to 50 files in one batch (one approval)
 
 // Settings (Ben, 2026-11-16): fewer clicks by default - "Attach" files at once (the click is the approval; FreeBird's plan is still
 // shown when FreeBird warns, e.g. the same filing was already done today).
@@ -17,7 +18,9 @@ const FILE_MAX = 25 * 1024 * 1024;  // FreeBird attaches files up to 25 MB (atta
 const DEFAULTS = { showPlan: false };
 
 const S = {};                       // the current e-mail and what has been chosen for it
-let runId = 0;                      // a newer e-mail (ItemChanged) cancels the views of an older one
+let runId = 0;                      // a newer e-mail (ItemChanged / SelectedItemsChanged) cancels the views of an older one
+// While e-mails are being filed (pinned panel), a click on another e-mail does not pull the panel away: it is offered when the filing ends.
+let filingNow = false, changedWhileFiling = false, changeTimer = 0;
 
 // ------------------------------------------------------------------ small helpers
 
@@ -34,8 +37,36 @@ function h(tag, attrs, ...kids) {
   for (const c of kids.flat()) if (c !== null && c !== undefined && c !== false) e.append(c instanceof Node ? c : String(c));
   return e;
 }
-function show(...nodes) { const app = document.getElementById("app"); app.replaceChildren(...nodes.flat(2).filter(n => n !== null && n !== undefined && n !== false)); window.scrollTo(0, 0); }
-function busy(text, sub) { S.view = "busy"; show(h("div", { class: "center" }, h("div", { class: "spin", "aria-hidden": "true" }), h("p", {}, text), sub ? h("p", { class: "muted small" }, sub) : null)); }
+function paint(nodes) { const app = document.getElementById("app"); app.replaceChildren(...nodes.flat(2).filter(n => n !== null && n !== undefined && n !== false)); window.scrollTo(0, 0); }
+function show(...nodes) { filingNow = false; paint(nodes); }      // any view but "busy": the panel may follow another e-mail again
+// busy: a spinner. #busyWait says what FreeBird does first when it is busy with another task (watchBusy, filing)
+function busy(text, sub, wait) {
+  S.view = "busy";
+  paint([h("div", { class: "center" }, h("div", { class: "spin", "aria-hidden": "true" }), h("p", {}, text), sub ? h("p", { class: "muted small" }, sub) : null),
+    h("div", { class: "note warn", id: "busyWait", hidden: !wait }, wait || "")]);
+}
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+// FreeBird runs one task at a time, in the order asked (a Claude task, another filing, this one). What it is doing first, in plain words:
+function busyNote(bz) {
+  if (!bz) return null;
+  if (bz.paused) return "FreeBird is paused. It carries on once it is resumed in FreeBird's window.";
+  if (bz.handedOver) return "You have HawkSoft right now. FreeBird waits until you hand it back.";
+  if (bz.what) return (bz.ours ? "FreeBird is finishing another filing first" : "FreeBird is busy with another task first") + ": " + bz.what + (bz.client ? " for " + bz.client : "") +
+    ". It does one task at a time, in order, so this waits its turn and then runs by itself.";
+  return null;
+}
+// a look-up waits behind FreeBird's current task: every few seconds the panel asks the helper what that is and says so
+async function watchBusy(p) {
+  let stop = false;
+  (async () => {
+    while (!stop) {
+      await sleep(2500); if (stop) break;
+      let t = null; try { t = busyNote((await api("/status", {})).busy); } catch (e) { }
+      const el = document.getElementById("busyWait"); if (el && !stop) { el.textContent = t || ""; el.hidden = !t; }
+    }
+  })();
+  try { return await p; } finally { stop = true; }
+}
 function note(kind, ...kids) { return h("div", { class: "note " + kind }, ...kids); }
 function getKey() { try { return localStorage.getItem(KEY_NAME) || S.key || ""; } catch (e) { return S.key || ""; } }
 function setKey(k) { S.key = k; try { localStorage.setItem(KEY_NAME, k); } catch (e) { } }
@@ -84,9 +115,16 @@ Office.onReady(() => {
       document.documentElement.setAttribute("data-theme", lum < 128 ? "dark" : "light");
     }
   } catch (e) { }
-  try { Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, () => start()); } catch (e) { }
+  try { Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, onChange); } catch (e) { }
+  try { if (Office.EventType.SelectedItemsChanged) Office.context.mailbox.addHandlerAsync(Office.EventType.SelectedItemsChanged, onChange); } catch (e) { }
   start();
 });
+
+function onChange() {
+  if (filingNow) { changedWhileFiling = true; return; }
+  clearTimeout(changeTimer); changeTimer = setTimeout(start, 200);      // ItemChanged and SelectedItemsChanged can both fire for one click
+}
+function nextMail() { return changedWhileFiling ? h("button", { class: "secondary next", onclick: start }, "Go to the e-mail selected now") : null; }
 
 // The e-mail's attachments: files (photos, PDFs ...) and attached e-mails can be handed over (Mailbox 1.8); cloud links cannot.
 // Pictures inside the message body are ticked too - Gmail puts photos pasted into the message there (live 2026-11-16: both claim photos
@@ -110,8 +148,12 @@ function readAttachments(item) {
 }
 
 async function start() {
-  const my = ++runId;
+  const my = ++runId; changedWhileFiling = false;
   for (const k of Object.keys(S)) if (k !== "key") delete S[k];
+  // several e-mails selected (Mailbox 1.15: the new Outlook, Outlook on the web): filed together, each on its own client
+  const sel = await selectedItems();
+  if (my !== runId) return;
+  if (sel.length > 1) return startMany(sel, my);
   const item = Office.context.mailbox.item;
   if (!item) { show(h("p", { class: "muted" }, "Open an e-mail to file it in HawkSoft.")); return; }
   S.from = item.from && item.from.emailAddress || "";
@@ -138,13 +180,14 @@ async function checkAndMatch(my) {
   S.testOnly = st.testOnly; S.testPrefix = st.testPrefix;
   if (!st.freebird || !st.freebird.up) return viewFreeBirdDown(st.freebird && st.freebird.message);
   if (st.freebird.state && st.freebird.state !== "ok") S.health = st.freebird.message;
+  if (S.many) return matchMany(my);
   await match({ from: S.from }, my);
 }
 
 async function match(q, my) {
   busy(q.query ? "Searching HawkSoft for “" + q.query + "”…" : "Looking up " + (S.from || "the sender") + " in HawkSoft…", "FreeBird checks HawkSoft's client list. Nothing is changed.");
   let m;
-  try { m = await api("/match", Object.assign({ fromName: S.fromName, subject: S.subject, text: S.text }, q)); }
+  try { m = await watchBusy(api("/match", Object.assign({ fromName: S.fromName, subject: S.subject, text: S.text }, q))); }
   catch (e) { if (my !== runId) return; return handle(e, () => match(q, my)); }
   if (my !== runId) return;
   if (!m.ok) return viewError(m.error, () => match(q, my));
@@ -164,6 +207,10 @@ function handle(e, retry) {
 // ------------------------------------------------------------------ views
 
 function mailCard() {
+  if (S.many) {
+    const on = S.many.filter(m => m.on), senders = new Set(on.map(m => (m.from || "").toLowerCase())).size;
+    return h("div", { class: "mail" }, h("div", { class: "from" }, plural(on.length, "e-mail", "e-mails")), h("div", { class: "subj" }, "from " + plural(senders, "sender", "senders")));
+  }
   return h("div", { class: "mail" },
     h("div", { class: "from" }, S.fromName && S.fromName !== S.from ? S.fromName + " · " + S.from : (S.from || "Unknown sender")),
     h("div", { class: "subj" }, S.subject || "(no subject)"));
@@ -315,13 +362,7 @@ async function stage() {
   if (S.draftId && S.stagedKey === key) return true;
   busy("Reading the e-mail…", files.length ? "and " + plural(files.length, "attachment", "attachments") : null);
   const eml = await officeAsync(cb => item.getAsFileAsync(cb));
-  const attachments = [];
-  for (const a of files) {
-    const c = await officeAsync(cb => item.getAttachmentContentAsync(a.id, cb));
-    const fmt = String(c.format || "").toLowerCase();
-    if (fmt === "base64") attachments.push({ name: a.name, base64: c.content });
-    else if (fmt === "eml" || fmt === "icalendar") attachments.push({ name: a.name, base64: b64Text(c.content) });
-  }
+  const attachments = await readContents(item, files);
   const sg = await api("/stage", { emlBase64: eml, subject: S.subject, attachments });
   if (!sg.ok) { viewError(sg.error, review); return false; }
   S.draftId = sg.draftId; S.stagedKey = key; S.extra = {};
@@ -329,8 +370,23 @@ async function stage() {
   return true;
 }
 
+async function readContents(item, files) {
+  const attachments = [];
+  for (const a of files) {
+    const c = await officeAsync(cb => item.getAttachmentContentAsync(a.id, cb));
+    const fmt = String(c.format || "").toLowerCase();
+    if (fmt === "base64") attachments.push({ name: a.name, base64: c.content });
+    else if (fmt === "eml" || fmt === "icalendar") attachments.push({ name: a.name, base64: b64Text(c.content) });
+  }
+  return attachments;
+}
+
+function viewMain() { return S.many ? viewMany() : viewChoose(); }
+
 async function review() {
+  if (S.many) return reviewMany();
   const my = runId, quick = !settings().showPlan;
+  filingNow = true;
   try {
     if (!(await stage())) return;
     if (my !== runId) return;
@@ -341,17 +397,22 @@ async function review() {
       if (pl.code === "restage") { S.draftId = null; return review(); }
       return viewError(pl.error + (pl.missing ? " (" + JSON.stringify(pl.missing) + ")" : ""), review, viewChoose);
     }
-    if (pl.jobIds) return filing(pl.jobIds);
-    // quick: the person's "Attach" click is the approval - unless FreeBird warns (the same filing was already done today): then its plan is shown
-    if (quick && !pl.earlierRun) return approve(pl);
-    viewConfirm(pl);
+    afterPlan(pl, quick);
   } catch (e) { if (my === runId) handle(e, review); }
+}
+// FreeBird's answer to /plan, one e-mail or several
+function afterPlan(pl, quick) {
+  if (pl.jobIds) return filing(pl.jobIds);
+  // quick: the person's "Attach" click is the approval - unless FreeBird warns (the same filing was already done today): then its plan is shown
+  if (quick && !pl.earlierRun) return approve(pl);
+  viewConfirm(pl);
 }
 
 async function approve(pl) {
+  filingNow = true;
   try {
     const ap = await api("/approve", { pendingId: pl.pendingId });
-    if (!ap.ok) return ap.code === "replan" ? review() : viewError(ap.error, review, viewChoose);
+    if (!ap.ok) return ap.code === "replan" ? review() : viewError(ap.error, review, viewMain);
     filing(ap.jobIds || [ap.jobId], ap.duplicate ? ap.note : null);
   } catch (e) { handle(e, review); }
 }
@@ -372,32 +433,40 @@ function viewConfirm(pl) {
     pl.earlierRun ? note("warn", h("p", {}, pl.earlierRun)) : null,
     h("h3", {}, "FreeBird will"), intro,
     h("ol", { class: "plan" }, lines.map(l => h("li", {}, l))),
-    h("div", { class: "actions" }, h("button", { class: "secondary", onclick: viewChoose }, "Back"), yes));
+    h("div", { class: "actions" }, h("button", { class: "secondary", onclick: viewMain }, "Back"), yes));
 }
 
 // One job per file (the e-mail first). Each is followed until it ends; FreeBird does them one after the other.
 async function filing(jobIds, dupNote) {
   const my = runId, t0 = Date.now(), res = jobIds.map(() => null);
+  filingNow = true;
   const names = jobIds.map((_, i) => (S.taskNames && S.taskNames[i]) || ("file " + (i + 1)));
   const sub = "FreeBird is working in HawkSoft on this PC. Leave HawkSoft alone until it's done.";
   busy("Filing in HawkSoft…", sub);
-  while (Date.now() - t0 < POLL_MAX_MS) {
-    await new Promise(r => setTimeout(r, POLL_MS));
+  // the clock starts once FreeBird is on these files: behind a long task of someone else's (Claude, another filing) it only waits
+  let waitFor = null, t1 = null;
+  while (t1 === null ? Date.now() - t0 < POLL_MAX_MS * 3 : Date.now() - t1 < POLL_MAX_MS) {
+    await sleep(POLL_MS);
     if (my !== runId) return;
+    waitFor = null;
     for (let i = 0; i < jobIds.length; i++) {
       if (res[i]) continue;
       let j;
       try { j = await api("/job/" + encodeURIComponent(jobIds[i])); } catch (e) { if (e instanceof BridgeDown) break; return handle(e, () => filing(jobIds, dupNote)); }
       if (my !== runId) return;
       if (!j.ok) return viewError(j.error, () => filing(jobIds, dupNote));
+      if (j.status === "queued" && i === res.findIndex(r => !r)) waitFor = busyNote(j.waitingFor);
+      if (j.status !== "queued" && t1 === null) t1 = Date.now();
       if (j.status === "queued" || j.status === "running") break;      // the next ones wait behind this one
       res[i] = j;
     }
     const left = res.findIndex(r => !r);
     if (left < 0) return viewResult(res, names, dupNote);
-    if (jobIds.length > 1) busy("Filing " + (left + 1) + " of " + jobIds.length + " in HawkSoft…", names[left].replace(/^the/, "The") + ". " + sub);
+    if (waitFor) busy("Waiting for FreeBird…", "Nothing is filed yet. FreeBird starts on it by itself as soon as it is free; you can leave this panel open.", waitFor);
+    else if (jobIds.length > 1) busy("Filing " + (left + 1) + " of " + jobIds.length + " in HawkSoft…", names[left].replace(/^the/, "The") + ". " + sub);
+    else busy("Filing in HawkSoft…", sub);
   }
-  viewError("FreeBird is still working after 10 minutes. Check FreeBird's window on this PC.", () => filing(jobIds, dupNote));
+  viewError(t1 === null ? "FreeBird has not started on this after 30 minutes. Check FreeBird's window on this PC." : "FreeBird is still working after 10 minutes. Check FreeBird's window on this PC.", () => filing(jobIds, dupNote));
 }
 
 function viewResult(res, names, dupNote) {
@@ -418,13 +487,15 @@ function viewDone(res, dupNote) {
   const created = all("created").filter(c => c && c.kind);
   const decisions = [...new Set(all("decisions"))], needsYou = all("needsYou");
   const verified = res.every(r => r.verified);
+  if (S.many) return viewDoneMany(res, dupNote, verified);
   show(h("div", { class: "center" }, h("div", { class: "done-icon", "aria-hidden": "true" }, "✓"),
       h("h2", {}, "Filed on " + whereText()),
       h("p", { class: "muted" }, verified ? "FreeBird checked it in HawkSoft." : "FreeBird filed it but could not read all of it back. Check the client's attachments.")),
     dupNote ? note("warn", h("p", {}, dupNote)) : null,
     created.length ? [h("h3", {}, "In HawkSoft now"), h("ul", { class: "list" }, created.map(c => h("li", {}, (c.kind === "log" ? "Log note: " : c.kind === "attachment" ? "Attachment: " : c.kind + ": ") + c.text)))] : null,
     decisions.length ? [h("h3", {}, "FreeBird decided"), h("ul", { class: "list" }, decisions.map(d => h("li", {}, d)))] : null,
-    needsYou.length ? note("warn", h("p", {}, "Still for you:"), h("ul", { class: "list" }, needsYou.map(d => h("li", {}, d)))) : null);
+    needsYou.length ? note("warn", h("p", {}, "Still for you:"), h("ul", { class: "list" }, needsYou.map(d => h("li", {}, d)))) : null,
+    nextMail());
 }
 
 // FreeBird asked about one of the files. The answer goes with that file only; filed ones are not filed again (FreeBird reuses them).
@@ -441,7 +512,7 @@ function viewQuestion(ni, ix, res, names) {
     ni.hint ? h("p", { class: "muted small" }, ni.hint) : null,
     opts.length ? h("div", { class: "opts" }, opts.map(o => h("button", { class: "secondary", onclick: () => answer(o.value) }, o.label || o.value)))
       : [free, h("button", { class: "primary", onclick: () => { if (free.value.trim()) answer(free.value.trim()); } }, "Continue")],
-    h("button", { class: "link", onclick: viewChoose }, "Back"));
+    h("button", { class: "link", onclick: viewMain }, "Back"));
 }
 
 function viewFailed(res, names) {
@@ -455,7 +526,8 @@ function viewFailed(res, names) {
     filedList(res, names),
     may.length ? note("warn", h("p", {}, "HawkSoft may already have saved " + may.join("; ") + ". Check the client in HawkSoft before trying again."))
       : h("p", { class: "muted small" }, many ? "Those were not saved in HawkSoft. Try again files only what is missing." : "Nothing was saved in HawkSoft."),
-    h("div", { class: "actions" }, h("button", { class: "secondary", onclick: viewChoose }, "Back"), may.length ? null : h("button", { class: "primary", onclick: review }, "Try again")));
+    h("div", { class: "actions" }, h("button", { class: "secondary", onclick: viewMain }, "Back"), may.length ? null : h("button", { class: "primary", onclick: review }, "Try again")),
+    nextMail());
 }
 
 function viewError(msg, retry, back) {
@@ -503,4 +575,217 @@ function viewPair() {
     h("p", {}, "One time only: this lets the panel hand e-mails to FreeBird on this PC."),
     h("p", { class: "muted small" }, "A code appears on your PC. Typing it here proves the panel and FreeBird are on the same computer."),
     startBtn, step2);
+}
+
+// ------------------------------------------------------------------ several e-mails selected together (Mailbox 1.15)
+// Ben's two cases: several e-mails from the SAME sender (usually one client, matched once) and from DIFFERENT senders (each its own client).
+// Each e-mail is matched like a single one (sender, then "named in the e-mail"); the person checks every row, then ONE Attach click files
+// all of them: one FreeBird batch, one plan, one approval. Each e-mail goes on its client's own tab (no policy) with its subject as the
+// description; its attachments too (one switch for all). A policy or single attachments: open that e-mail on its own.
+
+function selectedItems() {
+  return new Promise((resolve) => {
+    try {
+      if (!Office.context.requirements.isSetSupported("Mailbox", "1.15") || typeof Office.context.mailbox.getSelectedItemsAsync !== "function") return resolve([]);
+      Office.context.mailbox.getSelectedItemsAsync((r) => resolve(r.status === Office.AsyncResultStatus.Succeeded && Array.isArray(r.value) ? r.value.filter(x => !x.itemType || String(x.itemType).toLowerCase() === "message") : []));
+    } catch (e) { resolve([]); }
+  });
+}
+// One selected e-mail at a time (Outlook allows only one loaded at once): load, read, unload.
+async function withItem(id, fn) {
+  const it = await officeAsync(cb => Office.context.mailbox.loadItemByIdAsync(id, cb));
+  try { return await fn(it); }
+  finally { await new Promise(r => { try { it.unloadAsync(() => r()); } catch (e) { r(); } }); }
+}
+function mailFiles(m) { return S.attsOn ? (m.atts || []).filter(a => !a.why && !a.sig) : []; }
+function mailDesc(m) { return (m.subject || ("E-mail from " + (m.fromName || m.from))).slice(0, 100); }
+function mailNote(m) { return "E-mail from " + (m.fromName || m.from || "the sender") + (m.subject ? ": " + m.subject : "") + "."; }
+function senderGroups() {
+  const g = new Map();
+  for (const m of S.many) { const k = (m.from || "?").toLowerCase(); if (!g.has(k)) g.set(k, []); g.get(k).push(m); }
+  return [...g.values()];
+}
+
+async function startMany(sel, my) {
+  S.many = sel.slice(0, MAX_MAILS).map((x, n) => ({ n, itemId: x.itemId, subject: x.subject || "", on: true }));
+  S.tooMany = sel.length > MAX_MAILS ? sel.length : 0;
+  S.attsOn = true; S.extra = {};
+  for (const m of S.many) {
+    busy("Reading " + plural(S.many.length, "e-mail", "e-mails") + "…", (m.n + 1) + " of " + S.many.length);
+    try {
+      await withItem(m.itemId, async (it) => {
+        m.from = it.from && it.from.emailAddress || ""; m.fromName = it.from && it.from.displayName || ""; m.subject = it.subject || m.subject;
+        m.atts = readAttachments(it);
+        try { m.text = (await officeAsync(cb => it.body.getAsync(Office.CoercionType.Text, cb)) || "").slice(0, TEXT_LIMIT); } catch (e) { m.text = ""; }
+      });
+    } catch (e) { m.error = "Outlook could not open this e-mail: " + e.message; m.on = false; m.atts = []; }
+    if (my !== runId) return;
+  }
+  await checkAndMatch(my);
+}
+
+// one look-up per e-mail (the helper keeps a sender's matches for 2 minutes: the same sender is asked of HawkSoft once)
+async function matchMany(my) {
+  const list = S.many.filter(m => !m.error);
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
+    busy("Looking up the senders in HawkSoft…", (i + 1) + " of " + list.length + ". Nothing is changed.");
+    let r;
+    try { r = await watchBusy(api("/match", { from: m.from, fromName: m.fromName, subject: m.subject, text: m.text })); }
+    catch (e) { if (my !== runId) return; return handle(e, () => matchMany(my)); }
+    if (my !== runId) return;
+    m.match = r.ok ? r : { matches: [], error: r.error };
+    m.chosen = r.ok && r.suggested ? r.matches.find(x => x.id === r.suggested) || null : null;
+  }
+  viewMany();
+}
+
+function viewMany() {
+  const keepY = S.view === "many" ? window.scrollY : 0;      // a pick halfway down the list does not jump back to the top
+  S.view = "many";
+  const set = settings(), groups = senderGroups();
+  const on = S.many.filter(m => m.on), open = on.filter(m => !m.chosen);
+  const files = on.reduce((n, m) => n + mailFiles(m).length, 0), allFiles = S.many.reduce((n, m) => n + (m.atts || []).filter(a => !a.why && !a.sig).length, 0);
+  const tasks = on.length + files, clientsN = new Set(on.filter(m => m.chosen).map(m => m.chosen.id)).size;
+
+  const parts = groups.map(g => {
+    const head = g[0];
+    const who = head.fromName && head.fromName !== head.from ? head.fromName + " · " + head.from : (head.from || "Unknown sender");
+    // a client picked for one e-mail can be used for the others from the same sender that have none yet - only on the person's click
+    const picked = g.find(m => m.on && m.chosen);
+    const rest = picked ? g.filter(m => m.on && !m.chosen && m.match && (m.match.matches || []).some(c => c.id === picked.chosen.id && !c.blocked)) : [];
+    return h("section", { class: "sender" },
+      h("div", { class: "who" }, who, g.length > 1 ? h("span", { class: "muted" }, " · " + plural(g.length, "e-mail", "e-mails")) : null),
+      g.map(mailRow),
+      rest.length ? h("button", { class: "link", onclick: () => { rest.forEach(m => { m.chosen = (m.match.matches || []).find(c => c.id === picked.chosen.id); }); viewMany(); } },
+        "Use " + picked.chosen.name + (rest.length === 1 ? " for “" + (rest[0].subject || "(no subject)") + "” too" : " for the other " + rest.length + " e-mails from this sender")) : null);
+  });
+
+  const tog = h("input", { type: "checkbox", checked: S.attsOn, disabled: !allFiles });
+  tog.addEventListener("change", () => { S.attsOn = tog.checked; viewMany(); });
+  const go = h("button", { class: "primary", disabled: !on.length || open.length > 0 || tasks > MAX_MAILS, onclick: () => review() },
+    set.showPlan ? "Review and file" : "Attach " + plural(on.length, "e-mail", "e-mails"));
+  const hint = !on.length ? "Tick at least one e-mail."
+    : open.length ? "Choose the client for " + plural(open.length, "e-mail", "e-mails") + " first, or untick " + (open.length === 1 ? "it" : "them") + "."
+    : tasks > MAX_MAILS ? "That is " + tasks + " files with the attachments. FreeBird files up to " + MAX_MAILS + " in one go: untick some e-mails or the attachments."
+    : set.showPlan ? "You see FreeBird's plan for all of them before anything is filed."
+    : "Pressing Attach files " + plural(on.length, "e-mail", "e-mails") + (files ? " and " + plural(files, "attachment", "attachments") : "") + " on " + plural(clientsN, "client", "clients") + " right away, one after the other. FreeBird reads each back from HawkSoft.";
+
+  show(h("div", { class: "mail" }, h("div", { class: "from" }, plural(S.many.length, "e-mail", "e-mails") + " selected"), h("div", { class: "subj" }, "from " + plural(groups.length, "sender", "senders"))),
+    S.tooMany ? note("warn", h("p", {}, "Only the first " + MAX_MAILS + " of the " + S.tooMany + " selected e-mails are here.")) : null,
+    S.health ? note("warn", h("p", {}, S.health)) : null,
+    parts,
+    h("h3", {}, "Attachments"),
+    h("label", { class: "att" + (allFiles ? "" : " off") }, tog, h("div", {},
+      h("div", { class: "name" }, "Also file the attachments as separate files"),
+      h("div", { class: "meta" }, allFiles ? plural(allFiles, "attachment", "attachments") + " in these e-mails (signature pictures and cloud links left out). They are inside the filed e-mails either way." : "None of these e-mails has attachments to file."))),
+    h("p", { class: "muted small" }, "Each e-mail goes on its client (no policy), described by its subject, with the log note “E-mail from <sender>: <subject>.” To choose a policy or single attachments, open that e-mail on its own."),
+    h("p", { class: "small hint" }, hint),
+    go,
+    settingsPart(viewMany));
+  if (keepY) window.scrollTo(0, keepY);
+}
+
+function mailRow(m) {
+  const box = h("input", { type: "checkbox", checked: m.on, disabled: !!m.error, "aria-label": "File this e-mail" });
+  box.addEventListener("change", () => { m.on = box.checked; viewMany(); });
+  const nf = (m.atts || []).filter(a => !a.why && !a.sig).length;
+  const meta = m.error || (nf ? plural(nf, "attachment", "attachments") : "");
+  let pick = null;
+  if (!m.error && m.on) {
+    const ms = (m.match && m.match.matches) || [];
+    const search = h("button", { class: "link small", onclick: () => { m.searching = true; viewMany(); } }, "Search by name");
+    if (m.searching) pick = rowSearch(m);
+    else if (!ms.length) pick = [h("div", { class: "meta warn-text" }, m.match && m.match.error ? m.match.error : m.match && m.match.typed ? "No client in HawkSoft matches “" + m.match.query + "”." : "No client in HawkSoft has this address."), search];
+    else {
+      const sel = h("select", { "aria-label": "Client for “" + (m.subject || "this e-mail") + "”", class: m.chosen ? null : "need" },
+        m.chosen ? null : h("option", { value: "" }, ms.length > 1 ? "Choose the client (" + (m.match.total || ms.length) + " match)" : "Choose the client"),
+        ms.map(c => h("option", { value: c.id, disabled: c.blocked }, c.name + (c.named ? " · named in e-mail" : "") + (c.blocked ? " (test mode: not allowed)" : ""))));
+      sel.value = m.chosen ? m.chosen.id : "";
+      sel.addEventListener("change", () => { m.chosen = ms.find(c => c.id === sel.value) || null; viewMany(); });
+      const why = m.chosen && m.match.suggested === m.chosen.id && m.match.why ? "Picked: " + m.match.why + "." : null;
+      pick = [sel, h("div", { class: "meta" }, why, why ? " " : null, search)];
+    }
+  }
+  return h("div", { class: "mrow" + (m.on ? "" : " off") },
+    h("label", { class: "mhead" }, box, h("div", {}, h("div", { class: "name" }, m.subject || "(no subject)"), meta ? h("div", { class: "meta" }, meta) : null)),
+    pick ? h("div", { class: "mpick" }, pick) : null);
+}
+
+function rowSearch(m) {
+  const q = h("input", { type: "text", placeholder: "Client name, phone or policy number", "aria-label": "Search HawkSoft" });
+  const run = async () => {
+    const t = q.value.trim(); if (!t) return;
+    const my = runId;
+    busy("Searching HawkSoft for “" + t + "”…", "Nothing is changed.");
+    let r;
+    try { r = await watchBusy(api("/match", { query: t, fromName: m.fromName, subject: m.subject, text: m.text })); }
+    catch (e) { if (my !== runId) return; return handle(e, viewMany); }
+    if (my !== runId) return;
+    m.searching = false;
+    if (!r.ok) return viewError(r.error, null, viewMany);
+    m.match = r; m.chosen = r.suggested ? r.matches.find(x => x.id === r.suggested) || null : null;
+    viewMany();
+  };
+  q.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+  setTimeout(() => q.focus(), 0);
+  return [h("div", { class: "row" }, q, h("button", { class: "secondary", onclick: run }, "Search")),
+    h("button", { class: "link small", onclick: () => { m.searching = false; viewMany(); } }, "Cancel")];
+}
+
+// Each ticked e-mail (.eml) and its attachments go to the helper once; changing the attachment switch stages them again.
+async function stageMany() {
+  const on = S.many.filter(m => m.on);
+  for (let i = 0; i < on.length; i++) {
+    const m = on[i], files = mailFiles(m), key = files.map(a => a.id).join("|");
+    if (m.draftId && m.stagedKey === key) continue;
+    busy("Reading the e-mails…", (i + 1) + " of " + on.length);
+    const got = await withItem(m.itemId, async (it) => ({ eml: await officeAsync(cb => it.getAsFileAsync(cb)), attachments: await readContents(it, files) }));
+    const sg = await api("/stage", { emlBase64: got.eml, subject: m.subject, attachments: got.attachments });
+    if (!sg.ok) { viewError("“" + (m.subject || "(no subject)") + "”: " + sg.error, review, viewMany); return false; }
+    m.draftId = sg.draftId; m.stagedKey = key; S.extra = {};
+  }
+  return true;
+}
+
+async function reviewMany(restaged) {
+  const my = runId, quick = !settings().showPlan;
+  filingNow = true;
+  try {
+    if (!(await stageMany())) return;
+    if (my !== runId) return;
+    const on = S.many.filter(m => m.on);
+    // one name per FreeBird task, in the batch's order: each e-mail, then its attachments
+    S.taskNames = []; S.taskMail = [];
+    for (const m of on) {
+      S.taskNames.push("“" + (m.subject || "(no subject)") + "”"); S.taskMail.push(m);
+      for (const a of mailFiles(m)) { S.taskNames.push("“" + a.name + "” from “" + (m.subject || "(no subject)") + "”"); S.taskMail.push(m); }
+    }
+    busy(quick ? "Filing in HawkSoft…" : "Asking FreeBird for its plan…", quick ? "Getting FreeBird ready." : "Nothing is filed yet.");
+    const pl = await api("/plan", { extra: S.extra, items: on.map(m => ({ draftId: m.draftId, clientId: m.chosen.id, clientName: m.chosen.name, from: m.from, fromName: m.fromName, subject: m.subject, description: mailDesc(m), note: mailNote(m) })) });
+    if (my !== runId) return;
+    if (!pl.ok) {
+      if (pl.code === "restage" && !restaged) { for (const m of on) m.draftId = null; return reviewMany(true); }
+      return viewError(pl.error + (pl.missing ? " (" + JSON.stringify(pl.missing) + ")" : ""), review, viewMany);
+    }
+    afterPlan(pl, quick);
+  } catch (e) { if (my === runId) handle(e, review); }
+}
+
+function viewDoneMany(res, dupNote, verified) {
+  S.view = "done";
+  const on = S.many.filter(m => m.on);
+  const clientsN = new Set(on.map(m => m.chosen.id)).size;
+  const rows = on.map(m => {
+    const n = S.taskMail.filter(x => x === m).length;
+    return h("li", {}, h("strong", {}, m.subject || "(no subject)"), " → " + m.chosen.name + (n > 1 ? " (with " + plural(n - 1, "attachment", "attachments") + ")" : ""));
+  });
+  const needsYou = res.flatMap(r => r.needsYou || []);
+  show(h("div", { class: "center" }, h("div", { class: "done-icon", "aria-hidden": "true" }, "✓"),
+      h("h2", {}, "Filed " + plural(on.length, "e-mail", "e-mails") + " on " + plural(clientsN, "client", "clients")),
+      h("p", { class: "muted" }, verified ? "FreeBird checked each one in HawkSoft." : "FreeBird filed them but could not read all of them back. Check the clients' attachments.")),
+    dupNote ? note("warn", h("p", {}, dupNote)) : null,
+    h("ul", { class: "list" }, rows),
+    needsYou.length ? note("warn", h("p", {}, "Still for you:"), h("ul", { class: "list" }, [...new Set(needsYou)].map(d => h("li", {}, d)))) : null,
+    nextMail());
 }
