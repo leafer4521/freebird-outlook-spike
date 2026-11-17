@@ -2,7 +2,7 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
-const PANEL_VERSION = "0.3.3";
+const PANEL_VERSION = "0.3.5";
 let selDiag = "";                   // what Outlook answered to "which e-mails are selected?" (counts and errors only): shown by Settings, logged by the helper      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
 const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
@@ -374,7 +374,8 @@ async function stage() {
   const attachments = await readContents(item, files);
   const sg = await api("/stage", { emlBase64: eml, subject: S.subject, attachments });
   if (!sg.ok) { viewError(sg.error, review); return false; }
-  S.draftId = sg.draftId; S.stagedKey = key; S.extra = {};
+  if (S.stagedKey !== undefined && S.stagedKey !== key) { S.extra = {}; S.skip = new Set(); }      // other files ticked: the answers no longer fit
+  S.draftId = sg.draftId; S.stagedKey = key;
   S.taskNames = ["the e-mail"].concat(files.map(a => "“" + a.name + "”"));
   return true;
 }
@@ -400,10 +401,11 @@ async function review() {
     if (!(await stage())) return;
     if (my !== runId) return;
     busy(quick ? "Filing in HawkSoft…" : "Asking FreeBird for its plan…", quick ? "Getting FreeBird ready." : "Nothing is filed yet.");
-    const pl = await api("/plan", { draftId: S.draftId, clientId: S.chosen.id, clientName: S.chosen.name, policy: S.policy || "", from: S.from, fromName: S.fromName, subject: S.subject, description: S.desc, note: S.note, extra: S.extra });
+    const pl = await api("/plan", { draftId: S.draftId, clientId: S.chosen.id, clientName: S.chosen.name, policy: S.policy || "", from: S.from, fromName: S.fromName, subject: S.subject, description: S.desc, note: S.note, extra: S.extra, skip: [...(S.skip || [])] });
     if (my !== runId) return;
     if (!pl.ok) {
       if (pl.code === "restage") { S.draftId = null; return review(); }
+      if (pl.code === "nothing") return viewLeft();
       return viewError(pl.error + (pl.missing ? " (" + JSON.stringify(pl.missing) + ")" : ""), review, viewChoose);
     }
     afterPlan(pl, quick);
@@ -411,6 +413,11 @@ async function review() {
 }
 // FreeBird's answer to /plan, one e-mail or several
 function afterPlan(pl, quick) {
+  // the files in this filing (not left out), with their number in the whole list (answers and skips go by that number)
+  const all = S.taskNames || [];
+  S.liveIx = all.map((_, i) => i).filter(i => !(S.skip && S.skip.has(i)));
+  S.liveNames = S.liveIx.map(i => all[i]);
+  S.liveMail = S.taskMail ? S.liveIx.map(i => S.taskMail[i]) : null;
   if (pl.jobIds) return filing(pl.jobIds);
   // quick: the person's "Attach" click is the approval - unless FreeBird warns (the same filing was already done today): then its plan is shown
   if (quick && !pl.earlierRun) return approve(pl);
@@ -449,7 +456,7 @@ function viewConfirm(pl) {
 async function filing(jobIds, dupNote) {
   const my = runId, t0 = Date.now(), res = jobIds.map(() => null);
   filingNow = true;
-  const names = jobIds.map((_, i) => (S.taskNames && S.taskNames[i]) || ("file " + (i + 1)));
+  const names = jobIds.map((_, i) => (S.liveNames && S.liveNames[i]) || ("file " + (i + 1)));
   const sub = "FreeBird is working in HawkSoft on this PC. Leave HawkSoft alone until it's done.";
   busy("Filing in HawkSoft…", sub);
   // the clock starts once FreeBird is on these files: behind a long task of someone else's (Claude, another filing) it only waits
@@ -501,6 +508,7 @@ function viewDone(res, dupNote) {
       h("h2", {}, "Filed on " + whereText()),
       h("p", { class: "muted" }, verified ? "FreeBird checked it in HawkSoft." : "FreeBird filed it but could not read all of it back. Check the client's attachments.")),
     dupNote ? note("warn", h("p", {}, dupNote)) : null,
+    S.skip && S.skip.size && S.taskNames ? h("p", { class: "muted small" }, "Left as they were (already there): " + [...S.skip].map(i => S.taskNames[i]).join(", ") + ".") : null,
     created.length ? [h("h3", {}, "In HawkSoft now"), h("ul", { class: "list" }, created.map(c => h("li", {}, (c.kind === "log" ? "Log note: " : c.kind === "attachment" ? "Attachment: " : c.kind + ": ") + c.text)))] : null,
     decisions.length ? [h("h3", {}, "FreeBird decided"), h("ul", { class: "list" }, decisions.map(d => h("li", {}, d)))] : null,
     needsYou.length ? note("warn", h("p", {}, "Still for you:"), h("ul", { class: "list" }, needsYou.map(d => h("li", {}, d)))) : null,
@@ -513,22 +521,52 @@ function viewQuestion(ni, ix, res, names) {
   const opts = (ni.options || []).map(o => typeof o === "string" ? { value: o, label: o } : o);
   // the same question for several files (live 2026-11-16: 5 files of 2 e-mails were all "already there today"): asked once, the answer goes to each
   const same = res ? res.map((r, i) => i).filter(i => res[i].status === "needs_input" && res[i].needsInput && res[i].needsInput.param === ni.param) : [ix];
-  const answer = (v) => { for (const i of same) (S.extra[i] = S.extra[i] || {})[ni.param] = v; review(); };
+  const orig = (i) => (S.liveIx && S.liveIx[i] !== undefined ? S.liveIx[i] : i);
+  const answer = (v) => { for (const i of same) (S.extra[orig(i)] = S.extra[orig(i)] || {})[ni.param] = v; review(); };
   const free = h("input", { type: "text", placeholder: "Your answer" });
   const many = same.length > 1, dup = ni.param === "AllowDuplicate";
   const about = res && res.length > 1 && !many ? "About " + names[ix] + ": " : "";
-  const list = many ? h("ul", { class: "list" }, same.map(i => h("li", {}, names[i].replace(/^the/, "The")))) : null;
+  let list = many ? h("ul", { class: "list" }, same.map(i => h("li", {}, names[i].replace(/^the/, "The")))) : null;
+  // several files "already there today": some may really be repeats, some only share words with an earlier one (live 2026-11-16: the subject
+  // "LF Landscaping" vs the earlier "Please send proof of insurance for LF Landscaping"). One tick per file, none ticked: only the ticked
+  // ones are attached again, the others are left out.
+  let again = null;
+  if (dup && many) {
+    const ticks = new Set();
+    const go = h("button", { class: "primary" }, "Leave them all as they are");
+    const label = () => { go.textContent = ticks.size ? "Attach the ticked " + (ticks.size === 1 ? "one" : ticks.size) + " again, leave the rest" : "Leave them all as they are"; };
+    list = h("div", { class: "atts" }, same.map(i => {
+      const box = h("input", { type: "checkbox" });
+      box.addEventListener("change", () => { if (box.checked) ticks.add(i); else ticks.delete(i); label(); });
+      return h("label", { class: "att" }, box, h("div", {}, h("div", { class: "name" }, names[i].replace(/^the/, "The")), h("div", { class: "meta" }, "Tick to attach a second copy")));
+    }));
+    go.addEventListener("click", () => {
+      S.skip = S.skip || new Set();
+      for (const i of same) { if (ticks.has(i)) (S.extra[orig(i)] = S.extra[orig(i)] || {})[ni.param] = true; else S.skip.add(orig(i)); }
+      review();
+    });
+    again = go;
+  }
   show(mailCard(),
     note("warn", h("p", {}, (dup ? "FreeBird attached nothing it already had." : "FreeBird needs one more detail.") + (res && res.some(r => r.status === "done") ? "" : " Nothing was filed yet."))),
     res ? filedList(res, names) : null,
     dup ? [h("h2", {}, many ? "These are already on the client from earlier today:" : about + "This is already on the client from earlier today."), list,
-           h("p", { class: "muted small" }, "FreeBird checks this so nothing is filed twice. Attach " + (many ? "them" : "it") + " again only if a second copy is really wanted."),
+           h("p", { class: "muted small" }, "FreeBird compares names with what was attached today, not the contents, so a different file with a similar name can show up here. " + (many ? "Tick only the ones that really need a second copy." : "Attach it again only if it is really a different one.")),
            !many ? h("p", { class: "muted small" }, "FreeBird says: " + ni.question) : null]
         : [h("h2", {}, about + ni.question), many ? [h("p", { class: "small" }, "The same question for each of these; your answer goes to all of them:"), list] : null,
            ni.hint ? h("p", { class: "muted small" }, ni.hint) : null],
-    opts.length ? h("div", { class: "opts" }, opts.map(o => h("button", { class: "secondary", onclick: () => answer(o.value) }, dup ? (many ? "Attach them again anyway" : "Attach it again anyway") : (o.label || o.value))))
+    again ? again : opts.length ? h("div", { class: "opts" }, opts.map(o => h("button", { class: "secondary", onclick: () => answer(o.value) }, dup ? "Attach it again anyway" : (o.label || o.value))))
       : [free, h("button", { class: "primary", onclick: () => { if (free.value.trim()) answer(free.value.trim()); } }, "Continue")],
-    h("button", { class: "link", onclick: viewMain }, dup ? (many ? "Back (leave them as they are)" : "Back (leave it as it is)") : "Back"),
+    h("button", { class: "link", onclick: viewMain }, dup && !many ? "Back (leave it as it is)" : "Back"),
+    nextMail());
+}
+
+// every file asked about was left out: nothing more to file
+function viewLeft() {
+  S.view = "done";
+  show(h("div", { class: "center" }, h("div", { class: "done-icon", "aria-hidden": "true" }, "✓"),
+      h("h2", {}, "Nothing more to file"),
+      h("p", { class: "muted" }, "The files FreeBird found already there were left as they are. Anything else was filed before.")),
     nextMail());
 }
 
@@ -778,7 +816,8 @@ async function stageMany() {
     const got = await withItem(m.itemId, async (it) => ({ eml: await officeAsync(cb => it.getAsFileAsync(cb)), attachments: await readContents(it, files) }));
     const sg = await api("/stage", { emlBase64: got.eml, subject: m.subject, attachments: got.attachments });
     if (!sg.ok) { viewError("“" + (m.subject || "(no subject)") + "”: " + sg.error, review, viewMany); return false; }
-    m.draftId = sg.draftId; m.stagedKey = key; S.extra = {};
+    if (m.stagedKey !== undefined && m.stagedKey !== key) { S.extra = {}; S.skip = new Set(); }      // other files: the answers (by file number) no longer fit
+    m.draftId = sg.draftId; m.stagedKey = key;
   }
   return true;
 }
@@ -797,10 +836,11 @@ async function reviewMany(restaged) {
       for (const a of mailFiles(m)) { S.taskNames.push("“" + a.name + "” from “" + (m.subject || "(no subject)") + "”"); S.taskMail.push(m); }
     }
     busy(quick ? "Filing in HawkSoft…" : "Asking FreeBird for its plan…", quick ? "Getting FreeBird ready." : "Nothing is filed yet.");
-    const pl = await api("/plan", { extra: S.extra, items: on.map(m => ({ draftId: m.draftId, clientId: m.chosen.id, clientName: m.chosen.name, policy: m.policy || "", from: m.from, fromName: m.fromName, subject: m.subject, description: mailDesc(m), note: mailNote(m) })) });
+    const pl = await api("/plan", { extra: S.extra, skip: [...(S.skip || [])], items: on.map(m => ({ draftId: m.draftId, clientId: m.chosen.id, clientName: m.chosen.name, policy: m.policy || "", from: m.from, fromName: m.fromName, subject: m.subject, description: mailDesc(m), note: mailNote(m) })) });
     if (my !== runId) return;
     if (!pl.ok) {
       if (pl.code === "restage" && !restaged) { for (const m of on) m.draftId = null; return reviewMany(true); }
+      if (pl.code === "nothing") return viewLeft();
       return viewError(pl.error + (pl.missing ? " (" + JSON.stringify(pl.missing) + ")" : ""), review, viewMany);
     }
     afterPlan(pl, quick);
@@ -812,8 +852,9 @@ function viewDoneMany(res, dupNote, verified) {
   const on = S.many.filter(m => m.on);
   const clientsN = new Set(on.map(m => m.chosen.id)).size;
   const rows = on.map(m => {
-    const n = S.taskMail.filter(x => x === m).length;
-    return h("li", {}, h("strong", {}, m.subject || "(no subject)"), " → " + m.chosen.name + (m.policy ? ", policy " + m.policy : "") + (n > 1 ? " (with " + plural(n - 1, "attachment", "attachments") + ")" : ""));
+    const n = (S.liveMail || S.taskMail).filter(x => x === m).length, left = S.taskMail.filter(x => x === m).length - n;
+    return h("li", {}, h("strong", {}, m.subject || "(no subject)"), " → " + m.chosen.name + (m.policy ? ", policy " + m.policy : "") +
+      (n === 0 ? ": left as it was (already there)" : n > 1 ? " (with " + plural(n - 1, "attachment", "attachments") + ")" : "") + (n && left ? "; " + left + " left as already there" : ""));
   });
   const needsYou = res.flatMap(r => r.needsYou || []);
   show(h("div", { class: "center" }, h("div", { class: "done-icon", "aria-hidden": "true" }, "✓"),
