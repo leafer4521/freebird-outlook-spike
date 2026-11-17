@@ -2,7 +2,7 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
-const PANEL_VERSION = "0.3.1";
+const PANEL_VERSION = "0.3.2";
 let selDiag = "";                   // what Outlook answered to "which e-mails are selected?" (counts and errors only): shown by Settings, logged by the helper      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
 const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
@@ -276,13 +276,8 @@ function viewChoose() {
     const pols = S.pols[S.chosen.id];
     if (pols === undefined) loadPolicies(S.chosen, redraw);
     const list = Array.isArray(pols) ? pols : [];
-    const opt = (p) => h("option", { value: p.policy }, polLabel(p));
-    const inForce = list.filter(p => p.inForce), other = list.filter(p => !p.inForce);
-    const sel = h("select", { id: "policy", "aria-label": "File on", disabled: pols === undefined },
-      h("option", { value: "" }, "The client (no policy)"),
-      inForce.length && other.length ? [h("optgroup", { label: "In force" }, inForce.map(opt)), h("optgroup", { label: "Prospects and others" }, other.map(opt))] : list.map(opt));
-    sel.value = S.policy || "";
-    sel.addEventListener("change", () => { S.policy = sel.value; S.extra = {}; redraw(); });
+    const sel = policySelect(pols, S.policy, "File on", (v) => { S.policy = v; S.extra = {}; redraw(); });
+    sel.id = "policy";
     const sub = pols === undefined ? "Reading the client's policies…"
       : pols.error ? "Couldn't read the policies (" + pols.error + "), so it goes on the client."
       : !list.length ? "This client has no policies in HawkSoft, so it goes on the client."
@@ -339,15 +334,28 @@ function settingsPart(redraw) {
 }
 
 async function loadPolicies(c, redraw) {
-  if (S.pols[c.id] !== undefined || S.polLoading === c.id) return;
-  S.polLoading = c.id; const my = runId;
+  S.polBusy = S.polBusy || new Set();
+  if (S.pols[c.id] !== undefined || S.polBusy.has(c.id)) return;
+  S.polBusy.add(c.id); const my = runId;
   let r;
   try { r = await api("/policies", { clientId: c.id, clientName: c.name }); }
-  catch (e) { if (e instanceof NeedsPair || e instanceof BridgeDown) { S.polLoading = null; return handle(e); } r = { ok: false, error: e.message }; }
+  catch (e) { if (e instanceof NeedsPair || e instanceof BridgeDown) { S.polBusy.delete(c.id); return handle(e); } r = { ok: false, error: e.message }; }
   if (my !== runId) return;
-  S.polLoading = null;
+  S.polBusy.delete(c.id);
   S.pols[c.id] = r.ok ? (r.policies || []) : { error: r.error || "no answer" };
-  if (S.view === "choose" && S.chosen && S.chosen.id === c.id) redraw();
+  if (S.many ? S.view === "many" : (S.view === "choose" && S.chosen && S.chosen.id === c.id)) redraw();
+}
+// "File on": the client (default) or one of its policies - policies in force first, prospects and the rest below
+function policySelect(pols, value, label, onPick) {
+  const list = Array.isArray(pols) ? pols : [];
+  const opt = (p) => h("option", { value: p.policy }, polLabel(p));
+  const inForce = list.filter(p => p.inForce), other = list.filter(p => !p.inForce);
+  const sel = h("select", { "aria-label": label, disabled: pols === undefined },
+    h("option", { value: "" }, "The client (no policy)"),
+    inForce.length && other.length ? [h("optgroup", { label: "In force" }, inForce.map(opt)), h("optgroup", { label: "Prospects and others" }, other.map(opt))] : list.map(opt));
+  sel.value = value || "";
+  sel.addEventListener("change", () => onPick(sel.value));
+  return sel;
 }
 
 function searchBox(initial) {
@@ -619,7 +627,7 @@ function senderGroups() {
 async function startMany(sel, my) {
   S.many = sel.slice(0, MAX_MAILS).map((x, n) => ({ n, itemId: x.itemId, subject: x.subject || "", on: true }));
   S.tooMany = sel.length > MAX_MAILS ? sel.length : 0;
-  S.attsOn = true; S.extra = {};
+  S.attsOn = true; S.extra = {}; S.pols = {};
   for (const m of S.many) {
     busy("Reading " + plural(S.many.length, "e-mail", "e-mails") + "…", (m.n + 1) + " of " + S.many.length);
     try {
@@ -689,7 +697,7 @@ function viewMany() {
     h("label", { class: "att" + (allFiles ? "" : " off") }, tog, h("div", {},
       h("div", { class: "name" }, "Also file the attachments as separate files"),
       h("div", { class: "meta" }, allFiles ? plural(allFiles, "attachment", "attachments") + " in these e-mails (signature pictures and cloud links left out). They are inside the filed e-mails either way." : "None of these e-mails has attachments to file."))),
-    h("p", { class: "muted small" }, "Each e-mail goes on its client (no policy), described by its subject, with the log note “E-mail from <sender>: <subject>.” To choose a policy or single attachments, open that e-mail on its own."),
+    h("p", { class: "muted small" }, "Each e-mail goes on its client, or on the policy picked under it, described by its subject, with the log note “E-mail from <sender>: <subject>.” To choose single attachments, open that e-mail on its own."),
     h("p", { class: "small hint" }, hint),
     go,
     settingsPart(viewMany));
@@ -712,9 +720,18 @@ function mailRow(m) {
         m.chosen ? null : h("option", { value: "" }, ms.length > 1 ? "Choose the client (" + (m.match.total || ms.length) + " match)" : "Choose the client"),
         ms.map(c => h("option", { value: c.id, disabled: c.blocked }, c.name + (c.named ? " · named in e-mail" : "") + (c.blocked ? " (test mode: not allowed)" : ""))));
       sel.value = m.chosen ? m.chosen.id : "";
-      sel.addEventListener("change", () => { m.chosen = ms.find(c => c.id === sel.value) || null; viewMany(); });
+      sel.addEventListener("change", () => { m.chosen = ms.find(c => c.id === sel.value) || null; m.policy = ""; viewMany(); });
       const why = m.chosen && m.match.suggested === m.chosen.id && m.match.why ? "Picked: " + m.match.why + "." : null;
-      pick = [sel, h("div", { class: "meta" }, why, why ? " " : null, search)];
+      let pol = null;
+      if (m.chosen) {
+        const pols = S.pols[m.chosen.id];
+        if (pols === undefined) loadPolicies(m.chosen, viewMany);
+        const n = Array.isArray(pols) ? pols.length : 0;
+        pol = pols === undefined ? h("div", { class: "meta" }, "File on: reading the client's policies…")
+          : !n ? h("div", { class: "meta" }, pols.error ? "File on the client (couldn't read the policies)." : "File on the client (it has no policies).")
+          : h("div", { class: "fileon" }, h("span", { class: "meta" }, "File on"), policySelect(pols, m.policy, "File “" + (m.subject || "this e-mail") + "” on", (v) => { m.policy = v; viewMany(); }));
+      }
+      pick = [sel, pol, h("div", { class: "meta" }, why, why ? " " : null, search)];
     }
   }
   return h("div", { class: "mrow" + (m.on ? "" : " off") },
@@ -772,7 +789,7 @@ async function reviewMany(restaged) {
       for (const a of mailFiles(m)) { S.taskNames.push("“" + a.name + "” from “" + (m.subject || "(no subject)") + "”"); S.taskMail.push(m); }
     }
     busy(quick ? "Filing in HawkSoft…" : "Asking FreeBird for its plan…", quick ? "Getting FreeBird ready." : "Nothing is filed yet.");
-    const pl = await api("/plan", { extra: S.extra, items: on.map(m => ({ draftId: m.draftId, clientId: m.chosen.id, clientName: m.chosen.name, from: m.from, fromName: m.fromName, subject: m.subject, description: mailDesc(m), note: mailNote(m) })) });
+    const pl = await api("/plan", { extra: S.extra, items: on.map(m => ({ draftId: m.draftId, clientId: m.chosen.id, clientName: m.chosen.name, policy: m.policy || "", from: m.from, fromName: m.fromName, subject: m.subject, description: mailDesc(m), note: mailNote(m) })) });
     if (my !== runId) return;
     if (!pl.ok) {
       if (pl.code === "restage" && !restaged) { for (const m of on) m.draftId = null; return reviewMany(true); }
@@ -788,7 +805,7 @@ function viewDoneMany(res, dupNote, verified) {
   const clientsN = new Set(on.map(m => m.chosen.id)).size;
   const rows = on.map(m => {
     const n = S.taskMail.filter(x => x === m).length;
-    return h("li", {}, h("strong", {}, m.subject || "(no subject)"), " → " + m.chosen.name + (n > 1 ? " (with " + plural(n - 1, "attachment", "attachments") + ")" : ""));
+    return h("li", {}, h("strong", {}, m.subject || "(no subject)"), " → " + m.chosen.name + (m.policy ? ", policy " + m.policy : "") + (n > 1 ? " (with " + plural(n - 1, "attachment", "attachments") + ")" : ""));
   });
   const needsYou = res.flatMap(r => r.needsYou || []);
   show(h("div", { class: "center" }, h("div", { class: "done-icon", "aria-hidden": "true" }, "✓"),
