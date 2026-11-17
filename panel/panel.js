@@ -2,7 +2,7 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
-const PANEL_VERSION = "0.3.7";
+const PANEL_VERSION = "0.3.8";
 let selDiag = "";                   // what Outlook answered to "which e-mails are selected?" (counts and errors only): shown by Settings, logged by the helper      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
 const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
@@ -340,7 +340,7 @@ function viewChoose() {
 
 function settingsPart(redraw) {
   const set = settings();
-  if (!S.showSettings) return h("button", { class: "link quiet", onclick: () => { S.showSettings = true; redraw(); } }, "Settings · panel " + PANEL_VERSION + (selDiag ? " · " + selDiag : ""));
+  if (!S.showSettings) return h("button", { class: "link quiet", onclick: () => { S.showSettings = true; redraw(); } }, "Settings · panel " + PANEL_VERSION);
   const row = (k, label, sub) => {
     const box = h("input", { type: "checkbox", checked: !!set[k] });
     box.addEventListener("change", () => { setSetting(k, box.checked); redraw(); });
@@ -654,8 +654,8 @@ function viewPair() {
 // ------------------------------------------------------------------ several e-mails selected together (Mailbox 1.15)
 // Ben's two cases: several e-mails from the SAME sender (usually one client, matched once) and from DIFFERENT senders (each its own client).
 // Each e-mail is matched like a single one (sender, then "named in the e-mail"); the person checks every row, then ONE Attach click files
-// all of them: one FreeBird batch, one plan, one approval. Each e-mail goes on its client's own tab (no policy) with its subject as the
-// description; its attachments too (one switch for all). A policy or single attachments: open that e-mail on its own.
+// all of them: one FreeBird batch, one plan, one approval. Each e-mail goes on its client (or a policy picked under it) with its subject as the
+// description; a File on menu (policy) and attachment ticks per e-mail, plus one switch for all attachments.
 
 function selectedItems() {
   return new Promise((resolve) => {
