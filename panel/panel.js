@@ -2,7 +2,7 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
-const PANEL_VERSION = "0.3.2";
+const PANEL_VERSION = "0.3.3";
 let selDiag = "";                   // what Outlook answered to "which e-mails are selected?" (counts and errors only): shown by Settings, logged by the helper      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
 const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
@@ -511,17 +511,25 @@ function viewDone(res, dupNote) {
 function viewQuestion(ni, ix, res, names) {
   S.view = "question";
   const opts = (ni.options || []).map(o => typeof o === "string" ? { value: o, label: o } : o);
-  const answer = (v) => { (S.extra[ix] = S.extra[ix] || {})[ni.param] = v; review(); };
+  // the same question for several files (live 2026-11-16: 5 files of 2 e-mails were all "already there today"): asked once, the answer goes to each
+  const same = res ? res.map((r, i) => i).filter(i => res[i].status === "needs_input" && res[i].needsInput && res[i].needsInput.param === ni.param) : [ix];
+  const answer = (v) => { for (const i of same) (S.extra[i] = S.extra[i] || {})[ni.param] = v; review(); };
   const free = h("input", { type: "text", placeholder: "Your answer" });
-  const about = res && res.length > 1 ? "About " + names[ix] + ": " : "";
+  const many = same.length > 1, dup = ni.param === "AllowDuplicate";
+  const about = res && res.length > 1 && !many ? "About " + names[ix] + ": " : "";
+  const list = many ? h("ul", { class: "list" }, same.map(i => h("li", {}, names[i].replace(/^the/, "The")))) : null;
   show(mailCard(),
-    note("warn", h("p", {}, "FreeBird needs one more detail." + (res && res.some(r => r.status === "done") ? "" : " Nothing was filed yet."))),
+    note("warn", h("p", {}, (dup ? "FreeBird attached nothing it already had." : "FreeBird needs one more detail.") + (res && res.some(r => r.status === "done") ? "" : " Nothing was filed yet."))),
     res ? filedList(res, names) : null,
-    h("h2", {}, about + ni.question),
-    ni.hint ? h("p", { class: "muted small" }, ni.hint) : null,
-    opts.length ? h("div", { class: "opts" }, opts.map(o => h("button", { class: "secondary", onclick: () => answer(o.value) }, o.label || o.value)))
+    dup ? [h("h2", {}, many ? "These are already on the client from earlier today:" : about + "This is already on the client from earlier today."), list,
+           h("p", { class: "muted small" }, "FreeBird checks this so nothing is filed twice. Attach " + (many ? "them" : "it") + " again only if a second copy is really wanted."),
+           !many ? h("p", { class: "muted small" }, "FreeBird says: " + ni.question) : null]
+        : [h("h2", {}, about + ni.question), many ? [h("p", { class: "small" }, "The same question for each of these; your answer goes to all of them:"), list] : null,
+           ni.hint ? h("p", { class: "muted small" }, ni.hint) : null],
+    opts.length ? h("div", { class: "opts" }, opts.map(o => h("button", { class: "secondary", onclick: () => answer(o.value) }, dup ? (many ? "Attach them again anyway" : "Attach it again anyway") : (o.label || o.value))))
       : [free, h("button", { class: "primary", onclick: () => { if (free.value.trim()) answer(free.value.trim()); } }, "Continue")],
-    h("button", { class: "link", onclick: viewMain }, "Back"));
+    h("button", { class: "link", onclick: viewMain }, dup ? (many ? "Back (leave them as they are)" : "Back (leave it as it is)") : "Back"),
+    nextMail());
 }
 
 function viewFailed(res, names) {
