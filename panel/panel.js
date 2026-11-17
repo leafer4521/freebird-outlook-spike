@@ -2,7 +2,7 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
-const PANEL_VERSION = "0.3.5";
+const PANEL_VERSION = "0.3.6";
 let selDiag = "";                   // what Outlook answered to "which e-mails are selected?" (counts and errors only): shown by Settings, logged by the helper      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
 const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
@@ -80,6 +80,11 @@ function settings() {
 }
 function setSetting(k, v) { settings()[k] = v; try { localStorage.setItem(SET_NAME, JSON.stringify(memSettings)); } catch (e) { } }
 function kb(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB"; }
+// when a message arrived: tells the messages of one thread apart (they share a subject; live 2026-11-16 20:09)
+function whenText(d) {
+  try { d = d instanceof Date ? d : d ? new Date(d) : null; if (!d || isNaN(d)) return ""; } catch (e) { return ""; }
+  return d.toLocaleString("en-US", { weekday: "short", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
 function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
 function b64Text(s) { const b = new TextEncoder().encode(s); let t = ""; for (let i = 0; i < b.length; i += 0x8000) t += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(t); }
 
@@ -160,6 +165,7 @@ async function start() {
   S.from = item.from && item.from.emailAddress || "";
   S.fromName = item.from && item.from.displayName || "";
   S.subject = item.subject || "";
+  S.when = whenText(item.dateTimeCreated);
   S.extra = {};
   S.pols = {};
   S.atts = readAttachments(item);
@@ -214,7 +220,8 @@ function mailCard() {
   }
   return h("div", { class: "mail" },
     h("div", { class: "from" }, S.fromName && S.fromName !== S.from ? S.fromName + " · " + S.from : (S.from || "Unknown sender")),
-    h("div", { class: "subj" }, S.subject || "(no subject)"));
+    h("div", { class: "subj" }, S.subject || "(no subject)"),
+    S.when ? h("div", { class: "when" }, "Received " + S.when) : null);
 }
 
 function picked() { return S.atts.filter(a => S.pick.has(a.id)); }
@@ -679,12 +686,13 @@ async function startMany(sel, my) {
     try {
       await withItem(m.itemId, async (it) => {
         m.from = it.from && it.from.emailAddress || ""; m.fromName = it.from && it.from.displayName || ""; m.subject = it.subject || m.subject;
-        m.atts = readAttachments(it);
+        m.atts = readAttachments(it); m.at = it.dateTimeCreated ? new Date(it.dateTimeCreated).getTime() : 0; m.when = whenText(it.dateTimeCreated);
         try { m.text = (await officeAsync(cb => it.body.getAsync(Office.CoercionType.Text, cb)) || "").slice(0, TEXT_LIMIT); } catch (e) { m.text = ""; }
       });
     } catch (e) { m.error = "Outlook could not open this e-mail: " + e.message; m.on = false; m.atts = []; }
     if (my !== runId) return;
   }
+  S.many.sort((a, b) => (a.at || 0) - (b.at || 0));      // oldest first: a thread reads in order
   await checkAndMatch(my);
 }
 
@@ -754,7 +762,7 @@ function mailRow(m) {
   const box = h("input", { type: "checkbox", checked: m.on, disabled: !!m.error, "aria-label": "File this e-mail" });
   box.addEventListener("change", () => { m.on = box.checked; viewMany(); });
   const nf = (m.atts || []).filter(a => !a.why && !a.sig).length;
-  const meta = m.error || (nf ? plural(nf, "attachment", "attachments") : "");
+  const meta = m.error || [m.when ? "Received " + m.when : "", nf ? plural(nf, "attachment", "attachments") : ""].filter(Boolean).join(" · ");
   let pick = null;
   if (!m.error && m.on) {
     const ms = (m.match && m.match.matches) || [];

@@ -121,3 +121,4 @@ button.secondary.next { display: block; width: 100%; margin-top: 14px; }
 .fileon { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
 .fileon .meta { white-space: nowrap; }
 .fileon select { flex: 1; min-width: 0; }
+.mail .when { color: var(--muted); font-size: 12px; }
