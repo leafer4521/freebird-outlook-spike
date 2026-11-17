@@ -2,7 +2,8 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
-const PANEL_VERSION = "0.3.0";      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
+const PANEL_VERSION = "0.3.1";
+let selDiag = "";                   // what Outlook answered to "which e-mails are selected?" (counts and errors only): shown by Settings, logged by the helper      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
 const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
 const SET_NAME = "fbo.settings";
@@ -173,7 +174,7 @@ async function start() {
 
 async function checkAndMatch(my) {
   let st;
-  try { st = await api("/status", {}); }
+  try { st = await api("/status", { diag: selDiag }); }
   catch (e) { if (my !== runId) return; return e instanceof NeedsPair ? viewPair() : e instanceof BridgeDown ? viewBridgeDown() : viewError(e.message, () => start()); }
   if (my !== runId) return;
   document.getElementById("testBadge").hidden = !st.testOnly;
@@ -325,7 +326,7 @@ function viewChoose() {
 
 function settingsPart(redraw) {
   const set = settings();
-  if (!S.showSettings) return h("button", { class: "link quiet", onclick: () => { S.showSettings = true; redraw(); } }, "Settings · panel " + PANEL_VERSION);
+  if (!S.showSettings) return h("button", { class: "link quiet", onclick: () => { S.showSettings = true; redraw(); } }, "Settings · panel " + PANEL_VERSION + (selDiag ? " · " + selDiag : ""));
   const row = (k, label, sub) => {
     const box = h("input", { type: "checkbox", checked: !!set[k] });
     box.addEventListener("change", () => { setSetting(k, box.checked); redraw(); });
@@ -586,9 +587,18 @@ function viewPair() {
 function selectedItems() {
   return new Promise((resolve) => {
     try {
-      if (!Office.context.requirements.isSetSupported("Mailbox", "1.15") || typeof Office.context.mailbox.getSelectedItemsAsync !== "function") return resolve([]);
-      Office.context.mailbox.getSelectedItemsAsync((r) => resolve(r.status === Office.AsyncResultStatus.Succeeded && Array.isArray(r.value) ? r.value.filter(x => !x.itemType || String(x.itemType).toLowerCase() === "message") : []));
-    } catch (e) { resolve([]); }
+      let d = ""; try { d = Office.context.diagnostics ? Office.context.diagnostics.platform + " " + Office.context.diagnostics.version : ""; } catch (e) { }
+      const sets = [13, 14, 15].filter(v => { try { return Office.context.requirements.isSetSupported("Mailbox", "1." + v); } catch (e) { return false; } }).map(v => "1." + v).join(",");
+      selDiag = d + " sets " + (sets || "<1.13");
+      if (typeof Office.context.mailbox.getSelectedItemsAsync !== "function") { selDiag += " no getSelectedItemsAsync"; return resolve([]); }
+      if (!Office.context.requirements.isSetSupported("Mailbox", "1.15")) { selDiag += " (1.15 missing)"; }
+      Office.context.mailbox.getSelectedItemsAsync((r) => {
+        if (r.status !== Office.AsyncResultStatus.Succeeded) { selDiag += " selected: failed " + (r.error && (r.error.code + " " + r.error.message) || ""); return resolve([]); }
+        const v = Array.isArray(r.value) ? r.value : [];
+        selDiag += " selected: " + v.length + " [" + v.map(x => String(x.itemType || "?")).join(",") + "]";
+        resolve(Office.context.requirements.isSetSupported("Mailbox", "1.15") ? v.filter(x => !x.itemType || String(x.itemType).toLowerCase() === "message") : []);
+      });
+    } catch (e) { selDiag += " error " + e.message; resolve([]); }
   });
 }
 // One selected e-mail at a time (Outlook allows only one loaded at once): load, read, unload.
