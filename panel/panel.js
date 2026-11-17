@@ -2,7 +2,7 @@
 // the e-mail goes from Outlook straight to the PC.
 "use strict";
 
-const PANEL_VERSION = "0.3.6";
+const PANEL_VERSION = "0.3.7";
 let selDiag = "";                   // what Outlook answered to "which e-mails are selected?" (counts and errors only): shown by Settings, logged by the helper      // shown next to Settings: which panel Outlook is really running (GitHub Pages caches 10 minutes)
 const BRIDGE = window.FBO_BRIDGE || "http://127.0.0.1:8791";      // FBO_BRIDGE: addin\test\harness.html (a test helper on another port)
 const KEY_NAME = "fbo.bridgeKey";
@@ -137,7 +137,11 @@ function nextMail() { return changedWhileFiling ? h("button", { class: "secondar
 // were in the body) - except ones that look like signature art: Outlook's image001.png, logos, social icons, or under 5 KB.
 const SIG_NAME = /^(image\d{3}\.|outlook-|~wrl|logo|signature|sig[ _.-]|facebook|twitter|linkedin|instagram|youtube|x-logo)/i;
 const SIG_MAX = 5 * 1024;
-function readAttachments(item) {
+// A reply or forward quotes the earlier message, pictures in its body included (live 2026-11-16 20:13: a Gmail "Re:" carried the
+// original's photo as its own in-body attachment). Those are not ticked: shown as "likely quoted", the person can tick one that is new.
+const REPLY_SUBJ = /^\s*(re|fw|fwd|aw|sv|wg)\s*:/i;
+function readAttachments(item, subject) {
+  const isReply = REPLY_SUBJ.test(subject || "");
   let canRead = false;
   try { canRead = Office.context.requirements.isSetSupported("Mailbox", "1.8") && typeof item.getAttachmentContentAsync === "function"; } catch (e) { }
   return (item.attachments || []).map(a => {
@@ -149,8 +153,16 @@ function readAttachments(item) {
     else if (!canRead) why = "this Outlook can't hand it over";
     else if (a.size > FILE_MAX) why = "over HawkSoft's 25 MB";
     const inline = !!a.isInline;
-    return { id: a.id, name, size: a.size || 0, inline, sig: inline && (SIG_NAME.test(name) || (a.size || 0) < SIG_MAX), type, why };
+    const sig = inline && (SIG_NAME.test(name) || (a.size || 0) < SIG_MAX);
+    return { id: a.id, name, size: a.size || 0, inline, sig, quoted: inline && isReply && !sig, type, why };
   });
+}
+function tickedByDefault(a) { return !a.why && !a.sig && !a.quoted && !a.seenIn; }
+function attMeta(a) {
+  return [a.size ? kb(a.size) : "", a.why || (a.sig ? "in the message body, looks like a signature picture"
+    : a.seenIn ? "the same file is in the e-mail of " + a.seenIn
+    : a.quoted ? "in the body of a reply, likely quoted from an earlier e-mail"
+    : a.inline ? "in the message body" : "")].filter(Boolean).join(" · ");
 }
 
 async function start() {
@@ -168,8 +180,8 @@ async function start() {
   S.when = whenText(item.dateTimeCreated);
   S.extra = {};
   S.pols = {};
-  S.atts = readAttachments(item);
-  S.pick = new Set(S.atts.filter(a => !a.why && !a.sig).map(a => a.id));
+  S.atts = readAttachments(item, item.subject);
+  S.pick = new Set(S.atts.filter(tickedByDefault).map(a => a.id));
   busy("Checking FreeBird…");
   try {
     S.text = (await officeAsync(cb => item.body.getAsync(Office.CoercionType.Text, cb)) || "").slice(0, TEXT_LIMIT);
@@ -300,7 +312,7 @@ function viewChoose() {
         const box = h("input", { type: "checkbox", checked: S.pick.has(a.id), disabled: !!a.why });
         box.addEventListener("change", () => { if (box.checked) S.pick.add(a.id); else S.pick.delete(a.id); redraw(); });
         return h("label", { class: "att" + (a.why ? " off" : "") }, box,
-          h("div", {}, h("div", { class: "name" }, a.name), h("div", { class: "meta" }, [a.size ? kb(a.size) : "", a.why || (a.sig ? "in the message body, looks like a signature picture" : a.inline ? "in the message body" : "")].filter(Boolean).join(" · "))));
+          h("div", {}, h("div", { class: "name" }, a.name), h("div", { class: "meta" }, attMeta(a))));
       }))];
   }
 
@@ -668,7 +680,7 @@ async function withItem(id, fn) {
   try { return await fn(it); }
   finally { await new Promise(r => { try { it.unloadAsync(() => r()); } catch (e) { r(); } }); }
 }
-function mailFiles(m) { return S.attsOn ? (m.atts || []).filter(a => !a.why && !a.sig) : []; }
+function mailFiles(m) { return S.attsOn && m.pick ? (m.atts || []).filter(a => m.pick.has(a.id)) : []; }
 function mailDesc(m) { return (m.subject || ("E-mail from " + (m.fromName || m.from))).slice(0, 100); }
 function mailNote(m) { return "E-mail from " + (m.fromName || m.from || "the sender") + (m.subject ? ": " + m.subject : "") + "."; }
 function senderGroups() {
@@ -686,13 +698,19 @@ async function startMany(sel, my) {
     try {
       await withItem(m.itemId, async (it) => {
         m.from = it.from && it.from.emailAddress || ""; m.fromName = it.from && it.from.displayName || ""; m.subject = it.subject || m.subject;
-        m.atts = readAttachments(it); m.at = it.dateTimeCreated ? new Date(it.dateTimeCreated).getTime() : 0; m.when = whenText(it.dateTimeCreated);
+        m.atts = readAttachments(it, it.subject || m.subject); m.at = it.dateTimeCreated ? new Date(it.dateTimeCreated).getTime() : 0; m.when = whenText(it.dateTimeCreated);
         try { m.text = (await officeAsync(cb => it.body.getAsync(Office.CoercionType.Text, cb)) || "").slice(0, TEXT_LIMIT); } catch (e) { m.text = ""; }
       });
     } catch (e) { m.error = "Outlook could not open this e-mail: " + e.message; m.on = false; m.atts = []; }
     if (my !== runId) return;
   }
   S.many.sort((a, b) => (a.at || 0) - (b.at || 0));      // oldest first: a thread reads in order
+  // a file with the same name and size as one in an earlier selected e-mail (a thread quoting itself, a forward) is not ticked again
+  const seen = new Map();
+  for (const m of S.many) {
+    for (const a of m.atts || []) { const k = a.name.toLowerCase() + "|" + a.size; if (a.why) continue; if (seen.has(k)) a.seenIn = seen.get(k); else seen.set(k, m.when || "an earlier one"); }
+    m.pick = new Set((m.atts || []).filter(tickedByDefault).map(a => a.id));
+  }
   await checkAndMatch(my);
 }
 
@@ -717,7 +735,7 @@ function viewMany() {
   S.view = "many";
   const set = settings(), groups = senderGroups();
   const on = S.many.filter(m => m.on), open = on.filter(m => !m.chosen);
-  const files = on.reduce((n, m) => n + mailFiles(m).length, 0), allFiles = S.many.reduce((n, m) => n + (m.atts || []).filter(a => !a.why && !a.sig).length, 0);
+  const files = on.reduce((n, m) => n + mailFiles(m).length, 0), allFiles = S.many.reduce((n, m) => n + (m.atts || []).filter(a => !a.why).length, 0);
   const tasks = on.length + files, clientsN = new Set(on.filter(m => m.chosen).map(m => m.chosen.id)).size;
 
   const parts = groups.map(g => {
@@ -750,8 +768,8 @@ function viewMany() {
     h("h3", {}, "Attachments"),
     h("label", { class: "att" + (allFiles ? "" : " off") }, tog, h("div", {},
       h("div", { class: "name" }, "Also file the attachments as separate files"),
-      h("div", { class: "meta" }, allFiles ? plural(allFiles, "attachment", "attachments") + " in these e-mails (signature pictures and cloud links left out). They are inside the filed e-mails either way." : "None of these e-mails has attachments to file."))),
-    h("p", { class: "muted small" }, "Each e-mail goes on its client, or on the policy picked under it, described by its subject, with the log note “E-mail from <sender>: <subject>.” To choose single attachments, open that e-mail on its own."),
+      h("div", { class: "meta" }, allFiles ? "Tick them under each e-mail. They are inside the filed e-mails either way." : "None of these e-mails has attachments to file."))),
+    h("p", { class: "muted small" }, "Each e-mail goes on its client, or on the policy picked under it, described by its subject, with the log note “E-mail from <sender>: <subject>.”"),
     h("p", { class: "small hint" }, hint),
     go,
     settingsPart(viewMany));
@@ -761,8 +779,13 @@ function viewMany() {
 function mailRow(m) {
   const box = h("input", { type: "checkbox", checked: m.on, disabled: !!m.error, "aria-label": "File this e-mail" });
   box.addEventListener("change", () => { m.on = box.checked; viewMany(); });
-  const nf = (m.atts || []).filter(a => !a.why && !a.sig).length;
-  const meta = m.error || [m.when ? "Received " + m.when : "", nf ? plural(nf, "attachment", "attachments") : ""].filter(Boolean).join(" · ");
+  const meta = m.error || (m.when ? "Received " + m.when : "");
+  // its attachments, each with a tick (signature pictures, quoted pictures and files already in an earlier selected e-mail start unticked)
+  const atts = !m.error && m.on && S.attsOn && (m.atts || []).length ? h("div", { class: "matts" }, m.atts.map(a => {
+    const b = h("input", { type: "checkbox", checked: m.pick.has(a.id), disabled: !!a.why });
+    b.addEventListener("change", () => { if (b.checked) m.pick.add(a.id); else m.pick.delete(a.id); viewMany(); });
+    return h("label", { class: "att" + (a.why ? " off" : "") }, b, h("div", {}, h("div", { class: "name" }, a.name), h("div", { class: "meta" }, attMeta(a))));
+  })) : null;
   let pick = null;
   if (!m.error && m.on) {
     const ms = (m.match && m.match.matches) || [];
@@ -790,7 +813,8 @@ function mailRow(m) {
   }
   return h("div", { class: "mrow" + (m.on ? "" : " off") },
     h("label", { class: "mhead" }, box, h("div", {}, h("div", { class: "name" }, m.subject || "(no subject)"), meta ? h("div", { class: "meta" }, meta) : null)),
-    pick ? h("div", { class: "mpick" }, pick) : null);
+    pick ? h("div", { class: "mpick" }, pick) : null,
+    atts);
 }
 
 function rowSearch(m) {

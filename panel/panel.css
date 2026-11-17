@@ -122,3 +122,5 @@ button.secondary.next { display: block; width: 100%; margin-top: 14px; }
 .fileon .meta { white-space: nowrap; }
 .fileon select { flex: 1; min-width: 0; }
 .mail .when { color: var(--muted); font-size: 12px; }
+.matts { margin: 2px 0 4px 21px; }
+.matts .att { padding: 3px 2px; }
